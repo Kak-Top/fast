@@ -1,12 +1,33 @@
+import httpx
+import asyncio
+import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from routers import auth, patients, vitals, resources, ai, siem, chatbot
+
+async def keep_alive():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            url = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000")
+            async with httpx.AsyncClient() as client:
+                await client.get(f"{url}/")
+                print("Keep-alive ping sent ✓")
+        except Exception as e:
+            print(f"Keep-alive failed: {e}")
+        await asyncio.sleep(5 * 60)
+
+@asynccontextmanager
+async def lifespan(app):
+    asyncio.create_task(keep_alive())
+    yield
 
 app = FastAPI(
     title="ICU Digital Twin API",
     description="Hospital ICU Digital Twin Simulation System with SIEM Security",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
