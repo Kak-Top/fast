@@ -1,0 +1,16 @@
+fastapi==0.111.0
+uvicorn==0.29.0
+python-jose[cryptography]==3.3.0
+python-multipart==0.0.9
+pydantic==2.7.0
+bcrypt==4.0.1 
+passlib==1.7.4
+# AI/ML (for production model replacement)
+scikit-learn==1.4.2
+xgboost==2.0.3
+# torch==2.3.0  # uncomment for LSTM models
+
+# LLM Chatbot (for production)
+# langchain==0.1.20
+# openai==1.30.0
+# anthropic==0.28.0
