@@ -37,6 +37,14 @@ fake_users_db = {
         "hashed_password": pwd_context.hash("admin123"),
         "disabled": False,
     },
+     "dr.sara": {
+        "user_id": "u003",
+        "username": "dr.sara",
+        "full_name": "Dr. Sara Mohammed",
+        "role": "clinician",
+        "hashed_password": pwd_context.hash("sara123"),
+        "disabled": False,
+    },
 }
 
 fake_patients_db = {
