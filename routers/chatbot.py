@@ -1,18 +1,20 @@
 """
-Chatbot Router — Fast + Clean Output
--------------------------------------
-Fixes:
-  1. Prioritizes fastest free models (GLM, GPT-OSS, MiniMax)
-  2. Instructs model to respond in plain conversational text — no raw markdown tables
-  3. Streams-friendly short responses
-  4. Falls back cleanly
+Chatbot Router — Smart Output + Fast Routing
+---------------------------------------------
+Key improvements:
+  1. Query classifier: deep analysis → best model, simple → fastest
+  2. Server-side markdown→HTML conversion so the frontend always gets clean HTML
+  3. System prompt with concrete good/bad examples the model actually follows
+  4. Graceful fallback chain
 
-Install: pip install httpx
+Install: pip install httpx markdown2
 Env:     OPENROUTER_API_KEY=your_key_here
 """
 
 import os
+import re
 import httpx
+import markdown2
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from datetime import datetime
@@ -28,30 +30,49 @@ router = APIRouter()
 
 chat_sessions: dict = {}
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
-
-# ── Model priority list — fastest first ───────────────────────────────────────
-# Ranked by speed on free tier based on community benchmarks (March 2026)
-FREE_MODELS = [
-    "openrouter/free",
-    "z-ai/glm-4.5-air:free",                        # fastest — GLM is very snappy
-    "openai/gpt-oss-20b:free",                       # fast, GPT-style output quality
-    "openai/gpt-oss-120b:free",                      # slower but highest quality
-    "minimax/minimax-m2.5:free",                     # fast, good reasoning
-    "qwen/qwen3-coder:free",                         # good but slower
-    "meta-llama/llama-3.3-70b-instruct:free",        # reliable fallback
-]
-
-MAX_HISTORY = 7  # keep last 6 exchanges in memory
-
 
 class ChatQuery(BaseModel):
     question:   str
     session_id: str = "default"
 
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-# ── ICU context — compact version ─────────────────────────────────────────────
+# ── Model tiers ───────────────────────────────────────────────────────────────
+# DEEP tier: used for analysis, recommendations, explanations — quality first
+DEEP_MODELS = [
+    "openai/gpt-oss-120b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "minimax/minimax-m2.5:free",
+    "openrouter/free",
+]
+
+# FAST tier: used for simple lookups, summaries, yes/no answers
+FAST_MODELS = [
+    "z-ai/glm-4.5-air:free",
+    "openai/gpt-oss-20b:free",
+    "minimax/minimax-m2.5:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "openrouter/free",
+]
+
+MAX_HISTORY = 6
+
+# ── Keywords that trigger deep-analysis routing ───────────────────────────────
+DEEP_KEYWORDS = {
+    "analysis", "analyse", "analyze", "recommend", "recommendation",
+    "explain", "differential", "diagnosis", "diagnose", "assessment",
+    "prognosis", "treatment", "plan", "why", "interpret", "evaluate",
+    "concern", "risk", "deteriorat", "suggest", "advice", "compare",
+}
+
+
+def _is_deep_query(question: str) -> bool:
+    q = question.lower()
+    return any(kw in q for kw in DEEP_KEYWORDS)
+
+
+# ── ICU context ───────────────────────────────────────────────────────────────
 def _build_icu_context() -> str:
     patients  = list(fake_patients_db.values())
     resources = list(fake_resources_db.values())
@@ -65,10 +86,10 @@ def _build_icu_context() -> str:
         if history:
             v = history[-1]
             vitals_lines.append(
-                f"{p['name']} ({p['bed_id']}, {p['status'].upper()}): "
-                f"HR {v.get('heart_rate')} bpm, SpO2 {v.get('spo2')}%, "
-                f"BP {v.get('blood_pressure_sys')}/{v.get('blood_pressure_dia')} mmHg, "
-                f"Temp {v.get('temperature')}°C, RR {v.get('respiratory_rate')}/min"
+                f"{p['name']} (Bed {p['bed_id']}, {p['status'].upper()}): "
+                f"HR {v.get('heart_rate')} bpm | SpO2 {v.get('spo2')}% | "
+                f"BP {v.get('blood_pressure_sys')}/{v.get('blood_pressure_dia')} mmHg | "
+                f"Temp {v.get('temperature')}°C | RR {v.get('respiratory_rate')}/min"
             )
 
     beds_avail  = sum(1 for r in resources if r["type"] == "bed"        and r["status"] == "available")
@@ -77,55 +98,103 @@ def _build_icu_context() -> str:
     total_vents = sum(1 for r in resources if r["type"] == "ventilator")
 
     recent_siem = fake_siem_events_db[-3:] if fake_siem_events_db else []
-    siem_lines  = [f"[{e.get('severity')}] {e.get('event_type')}: {e.get('description')}" for e in recent_siem]
+    siem_lines  = [
+        f"[{e.get('severity')}] {e.get('event_type')}: {e.get('description')}"
+        for e in recent_siem
+    ]
 
     lines = [
-        f"ICU has {len(patients)} patients. Critical: {len(critical)} ({', '.join(p['name'] for p in critical) or 'none'}). Stable: {len(stable)}.",
-        f"Beds: {beds_avail}/{total_beds} available. Ventilators: {vents_avail}/{total_vents} available.",
+        f"Patients: {len(patients)} total | Critical: {len(critical)} ({', '.join(p['name'] for p in critical) or 'none'}) | Stable: {len(stable)}",
+        f"Resources: {beds_avail}/{total_beds} beds free | {vents_avail}/{total_vents} ventilators free",
     ]
     if vitals_lines:
-        lines.append("Vitals: " + " | ".join(vitals_lines))
+        lines.append("Latest vitals: " + " || ".join(vitals_lines))
     if siem_lines:
-        lines.append("Recent security events: " + "; ".join(siem_lines))
+        lines.append("Recent security events: " + " | ".join(siem_lines))
 
-    return " ".join(lines)
+    return "\n".join(lines)
 
 
-# ── System prompt — forces clean conversational output ────────────────────────
-def _build_system_prompt() -> str:
+# ── System prompt ─────────────────────────────────────────────────────────────
+def _build_system_prompt(deep: bool = False) -> str:
     icu_context = _build_icu_context()
-    return f"""You are a smart AI assistant embedded in a hospital ICU Digital Twin system.
+    depth_note = (
+        "The user is asking for a deep clinical analysis. Be thorough, structured, and precise."
+        if deep else
+        "Keep the response brief and direct."
+    )
 
-IMPORTANT FORMATTING RULES — follow these strictly:
-- Write in plain, natural sentences. No markdown tables. No raw asterisks. No pipe characters.
-- Use bullet points (•) only when listing 3+ items. Keep them short.
-- Bold words are fine when rendered (use **word**) but avoid overusing them.
-- Be concise. Give complete answers in as few words as possible.
-- For medical questions: be clinically precise and actionable.
-- For general questions: be helpful and direct.
+    return f"""You are an expert AI clinical assistant embedded in a hospital ICU Digital Twin system.
 
-You have access to live ICU data. Use it when relevant. Never invent patient values.
+{depth_note}
 
-LIVE ICU DATA: {icu_context}"""
+FORMATTING RULES — follow exactly, no exceptions:
+- Use Markdown formatting: **bold** for key terms, ## for section headers, - for bullet points.
+- For clinical data, use structured sections with headers like: ## Patient Overview, ## Vital Signs, ## Clinical Concerns, ## Recommendations.
+- Present vitals as bullet points, NOT as pipe tables. Example:
+  - **Heart Rate**: 118 bpm — Tachycardia, compensatory for low BP
+  - **SpO2**: 89% — Hypoxemia, needs supplemental O2
+- For recommendations, number them: 1. 2. 3.
+- Never output raw pipe/table syntax like: | HR | Value | Range |
+- Never output triple-dashes (---) or equals signs (===) as dividers.
+- Be clinically accurate. Never invent patient values.
+
+LIVE ICU DATA:
+{icu_context}"""
 
 
-# ── OpenRouter call — tries models in speed order ─────────────────────────────
+# ── Markdown → clean HTML ─────────────────────────────────────────────────────
+def _md_to_html(text: str) -> str:
+    """
+    Convert markdown to HTML.
+    Also strip any accidental pipe-table lines that slip through.
+    """
+    # Remove raw pipe-table rows the model sometimes still outputs
+    lines = text.splitlines()
+    clean_lines = []
+    for line in lines:
+        # Skip markdown table separator rows (|---|---|) and table rows
+        stripped = line.strip()
+        if re.match(r"^\|[-| :]+\|$", stripped):
+            continue
+        if stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 3:
+            # Convert table row to bullet point instead of dropping it
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            cells = [c for c in cells if c]
+            if cells:
+                clean_lines.append("- " + " — ".join(cells))
+            continue
+        clean_lines.append(line)
+
+    cleaned_md = "\n".join(clean_lines)
+
+    # Convert markdown to HTML using markdown2 with extras
+    html = markdown2.markdown(
+        cleaned_md,
+        extras=["fenced-code-blocks", "strike", "tables", "cuddled-lists", "break-on-newline"],
+    )
+    return html.strip()
+
+
+# ── OpenRouter call ───────────────────────────────────────────────────────────
 async def _ask_llm(question: str, session_id: str) -> tuple[str, str]:
-    """Returns (answer, model_used)"""
+    """Returns (html_answer, model_used)"""
     if not OPENROUTER_API_KEY:
         return _fallback_engine(question), "fallback-keyword-engine"
 
-    system_prompt = _build_system_prompt()
-    history       = chat_sessions.get(session_id, [])
+    deep      = _is_deep_query(question)
+    models    = DEEP_MODELS if deep else FAST_MODELS
+    system_p  = _build_system_prompt(deep=deep)
+    history   = chat_sessions.get(session_id, [])
 
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = [{"role": "system", "content": system_p}]
     for entry in history[-MAX_HISTORY:]:
         messages.append({"role": "user",      "content": entry["question"]})
-        messages.append({"role": "assistant",  "content": entry["answer"]})
+        messages.append({"role": "assistant",  "content": entry["answer_raw"]})
     messages.append({"role": "user", "content": question})
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        for model in FREE_MODELS:
+    async with httpx.AsyncClient(timeout=40) as client:
+        for model in models:
             try:
                 response = await client.post(
                     OPENROUTER_URL,
@@ -138,31 +207,29 @@ async def _ask_llm(question: str, session_id: str) -> tuple[str, str]:
                     json={
                         "model":       model,
                         "messages":    messages,
-                        "max_tokens":  500,
-                        "temperature": 0.5,
+                        "max_tokens":  800 if deep else 400,
+                        "temperature": 0.4,
                     },
                 )
 
                 data = response.json()
 
                 if "choices" in data:
-                    answer = data["choices"][0]["message"]["content"].strip()
-                    print(f"✓ Responded: {model}")
-                    return answer, model
+                    raw    = data["choices"][0]["message"]["content"].strip()
+                    html   = _md_to_html(raw)
+                    print(f"✓ [{('DEEP' if deep else 'FAST')}] Responded: {model}")
+                    return html, raw, model
 
                 error = data.get("error", {})
                 code  = error.get("code") if isinstance(error, dict) else None
-                print(f"✗ {model} returned error {code} — trying next")
-
-                if code not in (429, 503, 404):
-                    # Unexpected error — still try next model
-                    continue
+                print(f"✗ {model} → error {code}, trying next")
 
             except Exception as e:
-                print(f"✗ {model} exception: {e} — trying next")
+                print(f"✗ {model} → exception: {e}, trying next")
                 continue
 
-    return _fallback_engine(question), "fallback-keyword-engine"
+    raw = _fallback_engine(question)
+    return _md_to_html(raw), raw, "fallback-keyword-engine"
 
 
 # ── Fallback keyword engine ───────────────────────────────────────────────────
@@ -172,17 +239,18 @@ def _fallback_engine(question: str) -> str:
     if any(w in q for w in ["bed", "beds", "capacity"]):
         beds      = [r for r in fake_resources_db.values() if r["type"] == "bed"]
         available = sum(1 for b in beds if b["status"] == "available")
-        return f"There are {len(beds)} ICU beds — {available} available and {len(beds)-available} occupied."
+        return f"**Bed Status**: {available} of {len(beds)} ICU beds are currently available ({len(beds)-available} occupied)."
 
     if "ventilator" in q:
         vents     = [r for r in fake_resources_db.values() if r["type"] == "ventilator"]
         available = sum(1 for v in vents if v["status"] == "available")
-        return f"There are {len(vents)} ventilators — {available} are currently available."
+        return f"**Ventilators**: {available} of {len(vents)} are currently available."
 
     if any(w in q for w in ["critical", "deteriorat", "at risk", "danger"]):
         critical = [p for p in fake_patients_db.values() if p["status"] == "critical"]
         if critical:
-            return f"{len(critical)} critical patient(s) right now: {', '.join(p['name'] for p in critical)}."
+            names = ", ".join(p["name"] for p in critical)
+            return f"**{len(critical)} critical patient(s)** currently: {names}."
         return "No patients are currently flagged as critical."
 
     if "sepsis" in q or "risk" in q:
@@ -194,21 +262,21 @@ def _fallback_engine(question: str) -> str:
             )
         ]
         if high_risk:
-            return f"High sepsis risk detected for: {', '.join(high_risk)}. Immediate clinical review recommended."
+            return f"**High sepsis risk**: {', '.join(high_risk)}. Immediate clinical review recommended."
         return "No patients currently flagged as high sepsis risk."
 
     if any(w in q for w in ["summary", "status", "overview", "how many"]):
         beds_avail  = sum(1 for r in fake_resources_db.values() if r["type"] == "bed"        and r["status"] == "available")
         vents_avail = sum(1 for r in fake_resources_db.values() if r["type"] == "ventilator" and r["status"] == "available")
         return (
-            f"ICU has {len(fake_patients_db)} patients, "
-            f"{beds_avail} beds available, and {vents_avail} ventilators available."
+            f"**ICU Overview**: {len(fake_patients_db)} patients | "
+            f"{beds_avail} beds free | {vents_avail} ventilators free."
         )
 
     return (
-        "AI model is currently unavailable. "
-        "I can still answer questions about: beds, ventilators, critical patients, vitals, or ICU summary. "
-        "Make sure OPENROUTER_API_KEY is set in Render environment variables."
+        "**AI model unavailable.** I can still answer questions about: "
+        "beds, ventilators, critical patients, vitals, or ICU summary. "
+        "Ensure `OPENROUTER_API_KEY` is set in Render environment variables."
     )
 
 
@@ -217,6 +285,8 @@ def _fallback_engine(question: str) -> str:
 async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user)):
     """
     Ask anything — ICU data, medical questions, general knowledge.
+
+    Returns HTML-formatted answer ready to render in the frontend.
 
     **Sample Request:**
     ```json
@@ -229,34 +299,41 @@ async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user))
     **Sample Response:**
     ```json
     {
-      "question": "Provide deep analysis for Khalid...",
-      "answer": "Khalid Al-Mansouri is in critical condition...",
-      "model": "z-ai/glm-4.5-air:free",
-      "session_id": "dr_ahmad_session"
+      "question": "...",
+      "answer": "<h2>Patient Overview</h2><p>Khalid Al-Mansouri...</p>",
+      "answer_raw": "## Patient Overview\\nKhalid...",
+      "model": "openai/gpt-oss-120b:free",
+      "session_id": "dr_ahmad_session",
+      "query_type": "deep"
     }
     ```
     """
-    answer, model_used = await _ask_llm(body.question, body.session_id)
+    result = await _ask_llm(body.question, body.session_id)
+    answer_html, answer_raw, model_used = result
 
     if body.session_id not in chat_sessions:
         chat_sessions[body.session_id] = []
 
     entry = {
-        "question":  body.question,
-        "answer":    answer,
-        "timestamp": datetime.utcnow().isoformat(),
-        "asked_by":  current_user["username"],
+        "question":   body.question,
+        "answer":     answer_html,
+        "answer_raw": answer_raw,
+        "timestamp":  datetime.utcnow().isoformat(),
+        "asked_by":   current_user["username"],
     }
     chat_sessions[body.session_id].append(entry)
 
-    # Trim old history
     if len(chat_sessions[body.session_id]) > MAX_HISTORY * 2:
         chat_sessions[body.session_id] = chat_sessions[body.session_id][-MAX_HISTORY:]
 
     return {
-        **entry,
+        "question":   body.question,
+        "answer":     answer_html,
         "session_id": body.session_id,
         "model":      model_used,
+        "query_type": "deep" if _is_deep_query(body.question) else "fast",
+        "timestamp":  entry["timestamp"],
+        "asked_by":   entry["asked_by"],
     }
 
 
