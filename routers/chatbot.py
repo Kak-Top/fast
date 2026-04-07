@@ -1,15 +1,14 @@
 """
-Chatbot Router — General-Purpose AI with ICU Context Awareness
---------------------------------------------------------------
-Uses qwen/qwen3-coder:free via OpenRouter API.
-Can answer ANYTHING, but is also aware of the ICU state.
-Falls back to keyword engine if API call fails.
+Chatbot Router — Fast + Clean Output
+-------------------------------------
+Fixes:
+  1. Prioritizes fastest free models (GLM, GPT-OSS, MiniMax)
+  2. Instructs model to respond in plain conversational text — no raw markdown tables
+  3. Streams-friendly short responses
+  4. Falls back cleanly
 
-Install:
-    pip install httpx
-
-Set env variable:
-    OPENROUTER_API_KEY=your_key_here
+Install: pip install httpx
+Env:     OPENROUTER_API_KEY=your_key_here
 """
 
 import os
@@ -27,140 +26,105 @@ from dependencies import (
 
 router = APIRouter()
 
-# In-memory session history per session_id
 chat_sessions: dict = {}
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-# Model chain — tried in order on 429/404.
-# openrouter/free is OpenRouter's own smart router that auto-picks
-# any available free model, so it handles availability automatically.
+# ── Model priority list — fastest first ───────────────────────────────────────
+# Ranked by speed on free tier based on community benchmarks (March 2026)
 FREE_MODELS = [
-    "openrouter/free",              # auto-picks best available free model
-    "qwen/qwen3-coder:free",        # fallback if router itself is down
-    "google/gemma-3-12b-it:free",   # verified free March 2026
-    "meta-llama/llama-3.3-70b-instruct:free",  # verified free March 2026
-    "deepseek/deepseek-chat-v3-0324:free",     # verified free March 2026
+    "openrouter/free",
+    "z-ai/glm-4.5-air:free",                        # fastest — GLM is very snappy
+    "openai/gpt-oss-20b:free",                       # fast, GPT-style output quality
+    "openai/gpt-oss-120b:free",                      # slower but highest quality
+    "minimax/minimax-m2.5:free",                     # fast, good reasoning
+    "qwen/qwen3-coder:free",                         # good but slower
+    "meta-llama/llama-3.3-70b-instruct:free",        # reliable fallback
 ]
-FREE_MODEL = FREE_MODELS[0]  # updated to whichever model actually responds
 
-# Max turns to keep in memory per session
-MAX_HISTORY = 10
+MAX_HISTORY = 7  # keep last 6 exchanges in memory
 
 
-# ── Pydantic schemas ──────────────────────────────────────────────────────────
 class ChatQuery(BaseModel):
     question:   str
     session_id: str = "default"
 
 
-# ── ICU Context builder ───────────────────────────────────────────────────────
+# ── ICU context — compact version ─────────────────────────────────────────────
 def _build_icu_context() -> str:
-    """
-    Builds a real-time snapshot of the ICU state to inject as background
-    context into the system prompt. The model can use this if asked,
-    but is not restricted to it.
-    """
     patients  = list(fake_patients_db.values())
     resources = list(fake_resources_db.values())
-    siem      = fake_siem_events_db[-5:] if fake_siem_events_db else []
 
     critical = [p for p in patients if p.get("status") == "critical"]
     stable   = [p for p in patients if p.get("status") == "stable"]
 
-    patient_vitals = []
+    vitals_lines = []
     for p in patients:
         history = fake_vitals_db.get(p["patient_id"], [])
         if history:
             v = history[-1]
-            patient_vitals.append(
-                f"  - {p['name']} ({p['bed_id']}): "
-                f"HR={v.get('heart_rate')} bpm, "
-                f"SpO2={v.get('spo2')}%, "
-                f"BP={v.get('blood_pressure_sys')}/{v.get('blood_pressure_dia')} mmHg, "
-                f"Temp={v.get('temperature')}°C, "
-                f"RR={v.get('respiratory_rate')} breaths/min — "
-                f"Status: {p['status'].upper()}"
+            vitals_lines.append(
+                f"{p['name']} ({p['bed_id']}, {p['status'].upper()}): "
+                f"HR {v.get('heart_rate')} bpm, SpO2 {v.get('spo2')}%, "
+                f"BP {v.get('blood_pressure_sys')}/{v.get('blood_pressure_dia')} mmHg, "
+                f"Temp {v.get('temperature')}°C, RR {v.get('respiratory_rate')}/min"
             )
 
-    beds  = [r for r in resources if r["type"] == "bed"]
-    vents = [r for r in resources if r["type"] == "ventilator"]
-    mons  = [r for r in resources if r["type"] == "monitor"]
+    beds_avail  = sum(1 for r in resources if r["type"] == "bed"        and r["status"] == "available")
+    vents_avail = sum(1 for r in resources if r["type"] == "ventilator" and r["status"] == "available")
+    total_beds  = sum(1 for r in resources if r["type"] == "bed")
+    total_vents = sum(1 for r in resources if r["type"] == "ventilator")
 
-    beds_avail  = sum(1 for r in beds  if r["status"] == "available")
-    vents_avail = sum(1 for r in vents if r["status"] == "available")
-    mons_avail  = sum(1 for r in mons  if r["status"] == "available")
+    recent_siem = fake_siem_events_db[-3:] if fake_siem_events_db else []
+    siem_lines  = [f"[{e.get('severity')}] {e.get('event_type')}: {e.get('description')}" for e in recent_siem]
 
-    siem_summary = "\n".join([
-        f"  - [{e.get('severity')}] {e.get('event_type')}: {e.get('description')} from {e.get('source_ip')}"
-        for e in siem
-    ]) or "  - No recent security events"
+    lines = [
+        f"ICU has {len(patients)} patients. Critical: {len(critical)} ({', '.join(p['name'] for p in critical) or 'none'}). Stable: {len(stable)}.",
+        f"Beds: {beds_avail}/{total_beds} available. Ventilators: {vents_avail}/{total_vents} available.",
+    ]
+    if vitals_lines:
+        lines.append("Vitals: " + " | ".join(vitals_lines))
+    if siem_lines:
+        lines.append("Recent security events: " + "; ".join(siem_lines))
 
-    return f"""
-=== LIVE ICU STATE (use when relevant) ===
-PATIENTS ({len(patients)} total | Critical: {len(critical)} | Stable: {len(stable)})
-  Critical: {', '.join(p['name'] for p in critical) or 'None'}
-  Stable:   {', '.join(p['name'] for p in stable) or 'None'}
-
-LATEST VITALS:
-{chr(10).join(patient_vitals) or '  - No vitals recorded yet'}
-
-RESOURCES:
-  Beds:        {beds_avail}/{len(beds)} available
-  Ventilators: {vents_avail}/{len(vents)} available
-  Monitors:    {mons_avail}/{len(mons)} available
-
-RECENT SECURITY EVENTS (last 5):
-{siem_summary}
-==========================================
-"""
+    return " ".join(lines)
 
 
-# ── System prompt ─────────────────────────────────────────────────────────────
+# ── System prompt — forces clean conversational output ────────────────────────
 def _build_system_prompt() -> str:
     icu_context = _build_icu_context()
-    return f"""You are a highly capable AI assistant embedded inside an ICU Digital Twin hospital system.
+    return f"""You are a smart AI assistant embedded in a hospital ICU Digital Twin system.
 
-You can answer ANY question the user asks — whether it's about medicine, technology, programming, general knowledge, math, language, writing, or anything else. You are not restricted to ICU topics.
+IMPORTANT FORMATTING RULES — follow these strictly:
+- Write in plain, natural sentences. No markdown tables. No raw asterisks. No pipe characters.
+- Use bullet points (•) only when listing 3+ items. Keep them short.
+- Bold words are fine when rendered (use **word**) but avoid overusing them.
+- Be concise. Give complete answers in as few words as possible.
+- For medical questions: be clinically precise and actionable.
+- For general questions: be helpful and direct.
 
-However, you also have real-time access to the current ICU state (patients, vitals, resources, security events). When a question relates to the ICU, use the live data below to give accurate, specific answers. Never invent patient names or fabricate values.
+You have access to live ICU data. Use it when relevant. Never invent patient values.
 
-When answering:
-- Be conversational and natural, like a knowledgeable colleague.
-- For ICU/medical questions: be precise, clinical, and use the live data.
-- For general questions: be helpful, clear, and thorough.
-- If you're unsure about something, say so honestly.
-- Keep responses concise unless depth is needed.
-
-{icu_context}"""
+LIVE ICU DATA: {icu_context}"""
 
 
-# ── OpenRouter LLM call ───────────────────────────────────────────────────────
-async def _ask_llm(question: str, session_id: str) -> str:
-    """
-    Sends question + ICU context + conversation history to OpenRouter.
-    Tries each model in FREE_MODELS in order if one returns 429 (rate-limited).
-    """
-    global FREE_MODEL
-
+# ── OpenRouter call — tries models in speed order ─────────────────────────────
+async def _ask_llm(question: str, session_id: str) -> tuple[str, str]:
+    """Returns (answer, model_used)"""
     if not OPENROUTER_API_KEY:
-        return _fallback_engine(question)
+        return _fallback_engine(question), "fallback-keyword-engine"
 
-    # Rebuild system prompt each call so ICU data is always fresh
     system_prompt = _build_system_prompt()
+    history       = chat_sessions.get(session_id, [])
 
-    # Build message list: system + history + current question
-    history = chat_sessions.get(session_id, [])
     messages = [{"role": "system", "content": system_prompt}]
-
     for entry in history[-MAX_HISTORY:]:
         messages.append({"role": "user",      "content": entry["question"]})
         messages.append({"role": "assistant",  "content": entry["answer"]})
-
     messages.append({"role": "user", "content": question})
 
-    async with httpx.AsyncClient(timeout=45) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         for model in FREE_MODELS:
             try:
                 response = await client.post(
@@ -168,92 +132,83 @@ async def _ask_llm(question: str, session_id: str) -> str:
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                         "Content-Type":  "application/json",
-                        "HTTP-Referer":  "http://capstone.dpdns.org",
+                        "HTTP-Referer":  "https://capstone.dpdns.org",
                         "X-Title":       "ICU Digital Twin",
                     },
                     json={
                         "model":       model,
                         "messages":    messages,
-                        "max_tokens":  600,
-                        "temperature": 0.6,
+                        "max_tokens":  500,
+                        "temperature": 0.5,
                     },
                 )
+
                 data = response.json()
 
                 if "choices" in data:
-                    FREE_MODEL = model  # track which model actually responded
-                    print(f"✓ Model used: {model}")
-                    return data["choices"][0]["message"]["content"].strip()
+                    answer = data["choices"][0]["message"]["content"].strip()
+                    print(f"✓ Responded: {model}")
+                    return answer, model
 
                 error = data.get("error", {})
                 code  = error.get("code") if isinstance(error, dict) else None
+                print(f"✗ {model} returned error {code} — trying next")
 
-                if code == 429:
-                    print(f"429 rate-limit on {model}, trying next...")
-                    continue  # try the next model
-                else:
-                    print(f"OpenRouter error on {model}: {error}")
-                    continue  # non-429 error, still try next
+                if code not in (429, 503, 404):
+                    # Unexpected error — still try next model
+                    continue
 
             except Exception as e:
-                print(f"Request failed for {model}: {e}")
+                print(f"✗ {model} exception: {e} — trying next")
                 continue
 
-    # All models exhausted
-    print("All free models rate-limited or failed.")
-    return _fallback_engine(question)
+    return _fallback_engine(question), "fallback-keyword-engine"
 
 
 # ── Fallback keyword engine ───────────────────────────────────────────────────
 def _fallback_engine(question: str) -> str:
-    """Used only when the API key is missing or the call fails."""
     q = question.lower()
 
     if any(w in q for w in ["bed", "beds", "capacity"]):
         beds      = [r for r in fake_resources_db.values() if r["type"] == "bed"]
         available = sum(1 for b in beds if b["status"] == "available")
-        occupied  = len(beds) - available
-        return f"There are {len(beds)} ICU beds — {available} available, {occupied} occupied."
+        return f"There are {len(beds)} ICU beds — {available} available and {len(beds)-available} occupied."
 
     if "ventilator" in q:
         vents     = [r for r in fake_resources_db.values() if r["type"] == "ventilator"]
         available = sum(1 for v in vents if v["status"] == "available")
-        return f"There are {len(vents)} ventilators — {available} available."
+        return f"There are {len(vents)} ventilators — {available} are currently available."
 
     if any(w in q for w in ["critical", "deteriorat", "at risk", "danger"]):
         critical = [p for p in fake_patients_db.values() if p["status"] == "critical"]
         if critical:
-            names = ", ".join(p["name"] for p in critical)
-            return f"{len(critical)} critical patient(s): {names}."
+            return f"{len(critical)} critical patient(s) right now: {', '.join(p['name'] for p in critical)}."
         return "No patients are currently flagged as critical."
 
     if "sepsis" in q or "risk" in q:
         high_risk = [
-            patient["name"]
-            for pid, patient in fake_patients_db.items()
+            p["name"] for pid, p in fake_patients_db.items()
             if fake_vitals_db.get(pid) and (
                 fake_vitals_db[pid][-1].get("spo2", 100) < 92
                 or fake_vitals_db[pid][-1].get("blood_pressure_sys", 120) < 90
             )
         ]
         if high_risk:
-            return f"High sepsis risk: {', '.join(high_risk)}. Immediate review recommended."
+            return f"High sepsis risk detected for: {', '.join(high_risk)}. Immediate clinical review recommended."
         return "No patients currently flagged as high sepsis risk."
 
-    if any(w in q for w in ["summary", "status", "overview"]):
+    if any(w in q for w in ["summary", "status", "overview", "how many"]):
         beds_avail  = sum(1 for r in fake_resources_db.values() if r["type"] == "bed"        and r["status"] == "available")
         vents_avail = sum(1 for r in fake_resources_db.values() if r["type"] == "ventilator" and r["status"] == "available")
         return (
-            f"ICU Summary — Patients: {len(fake_patients_db)}, "
-            f"Beds available: {beds_avail}, Ventilators available: {vents_avail}."
+            f"ICU has {len(fake_patients_db)} patients, "
+            f"{beds_avail} beds available, and {vents_avail} ventilators available."
         )
 
-    # Generic fallback for non-ICU questions when API is down
     return (
-        "⚠️ AI model unavailable (no API key or connection failed). "
-        "I can still answer ICU questions about: bed availability, ventilators, "
-        "critical patients, vitals, sepsis risk, or give an ICU summary. "
-        "For all other questions, please ensure OPENROUTER_API_KEY is set."
+        "AI model is currently unavailable. "
+        "I can still answer questions about: beds, ventilators, critical patients, vitals, or ICU summary. "
+        "Make sure OPENROUTER_API_KEY is set in Render environment variables."
     )
 
 
@@ -261,22 +216,28 @@ def _fallback_engine(question: str) -> str:
 @router.post("/query", summary="Ask the AI assistant anything")
 async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user)):
     """
-    Send any question to the AI assistant.
-    It can answer general knowledge, medical, technical, or ICU-specific questions.
-    Powered by Qwen3-Coder via OpenRouter (free tier).
-    Falls back to keyword engine if API is unavailable.
+    Ask anything — ICU data, medical questions, general knowledge.
 
-    **Sample Requests:**
+    **Sample Request:**
     ```json
-    { "question": "Which patients are at risk right now?", "session_id": "session_dr_ahmad" }
-    { "question": "Explain what sepsis is", "session_id": "session_dr_ahmad" }
-    { "question": "Write a Python function to sort a list", "session_id": "session_dr_ahmad" }
-    { "question": "What's the capital of France?", "session_id": "session_dr_ahmad" }
+    {
+      "question": "Provide deep analysis for Khalid and what are the recommendations",
+      "session_id": "dr_ahmad_session"
+    }
+    ```
+
+    **Sample Response:**
+    ```json
+    {
+      "question": "Provide deep analysis for Khalid...",
+      "answer": "Khalid Al-Mansouri is in critical condition...",
+      "model": "z-ai/glm-4.5-air:free",
+      "session_id": "dr_ahmad_session"
+    }
     ```
     """
-    answer = await _ask_llm(body.question, body.session_id)
+    answer, model_used = await _ask_llm(body.question, body.session_id)
 
-    # Store in session memory
     if body.session_id not in chat_sessions:
         chat_sessions[body.session_id] = []
 
@@ -288,36 +249,26 @@ async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user))
     }
     chat_sessions[body.session_id].append(entry)
 
-    # Trim history to avoid unbounded growth
+    # Trim old history
     if len(chat_sessions[body.session_id]) > MAX_HISTORY * 2:
         chat_sessions[body.session_id] = chat_sessions[body.session_id][-MAX_HISTORY:]
 
     return {
         **entry,
         "session_id": body.session_id,
-        "model": FREE_MODEL if OPENROUTER_API_KEY else "fallback-keyword-engine",
+        "model":      model_used,
     }
 
 
 # ── GET /chatbot/history ──────────────────────────────────────────────────────
 @router.get("/history", summary="Get chat session history")
 def get_history(session_id: str = "default", current_user=Depends(get_current_user)):
-    """Returns the full conversation history for a given session."""
     history = chat_sessions.get(session_id, [])
-    return {
-        "session_id":     session_id,
-        "total_messages": len(history),
-        "history":        history,
-    }
+    return {"session_id": session_id, "total_messages": len(history), "history": history}
 
 
 # ── DELETE /chatbot/history ───────────────────────────────────────────────────
 @router.delete("/history", summary="Clear chatbot session history")
 def clear_history(session_id: str = "default", current_user=Depends(get_current_user)):
-    """Clears the conversation history for a session (fresh start)."""
     chat_sessions.pop(session_id, None)
-    return {
-        "message":    "Session history cleared.",
-        "session_id": session_id,
-        "cleared_by": current_user["username"],
-    }
+    return {"message": "Session cleared.", "session_id": session_id, "cleared_by": current_user["username"]}
