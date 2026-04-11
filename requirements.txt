@@ -7,3 +7,6 @@ python-multipart>=0.0.20
 pydantic>=2.10.0
 httpx>=0.28.0
 markdown2
+aiokafka>=0.10.0
+
+
