@@ -30,7 +30,7 @@ import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from patient_state_machine import PatientSimulator, PatientState
-from kafka_config import get_kafka_config
+from kafka_config import get_kafka_config, is_cloud_kafka
 
 logging.basicConfig(
     level=logging.INFO,
@@ -408,7 +408,8 @@ async def start_pipeline():
     """
     log.info("═" * 50)
     log.info("Starting embedded Kafka pipeline...")
-    log.info("  Kafka: %s", get_kafka_config()["bootstrap_servers"])
+    log.info("  Kafka: %s", KAFKA_BOOTSTRAP := os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"))
+    log.info("  Cloud Kafka: %s", "YES (SSL)" if is_cloud_kafka() else "NO (local)")
     log.info("  Self API: %s", SELF_BASE)
     log.info("  Tick interval: %ds", TICK_INTERVAL)
     log.info("  Patient poll interval: %ds", PATIENT_POLL_INTERVAL)
