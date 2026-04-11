@@ -69,7 +69,7 @@ async def _get_token(client: httpx.AsyncClient) -> str:
     if _token and (time.time() - _token_issued_at) < TOKEN_TTL:
         return _token
     resp = await client.post(
-        f"{SELF_BASE}/auth/login",
+        f"{_get_self_base()}/auth/login",
         data={"username": API_USERNAME, "password": API_PASSWORD},
     )
     resp.raise_for_status()
@@ -83,7 +83,7 @@ async def _fetch_patients(client: httpx.AsyncClient) -> list:
     """Fetch current patients from the API."""
     token = await _get_token(client)
     resp = await client.get(
-        f"{SELF_BASE}/icu/patients",
+        f"{_get_self_base()}/icu/patients",
         headers={"Authorization": f"Bearer {token}"},
     )
     resp.raise_for_status()
@@ -268,7 +268,7 @@ async def _vitals_consumer_loop():
 
                         # 1. POST vitals
                         resp = await client.post(
-                            f"{SELF_BASE}/icu/vitals/{patient_id}",
+                            f"{_get_self_base()}/icu/vitals/{patient_id}",
                             json=vitals,
                             headers={"Authorization": f"Bearer {token}"},
                             timeout=10,
@@ -283,7 +283,7 @@ async def _vitals_consumer_loop():
 
                         # 2. Get AI risk
                         resp2 = await client.get(
-                            f"{SELF_BASE}/icu/ai/risk/{patient_id}",
+                            f"{_get_self_base()}/icu/ai/risk/{patient_id}",
                             headers={"Authorization": f"Bearer {token}"},
                             timeout=10,
                         )
@@ -359,7 +359,7 @@ async def _labs_consumer_loop():
                     try:
                         token = await _get_token(client)
                         resp = await client.post(
-                            f"{SELF_BASE}/icu/labs/{patient_id}",
+                            f"{_get_self_base()}/icu/labs/{patient_id}",
                             json=labs,
                             headers={"Authorization": f"Bearer {token}"},
                             timeout=10,
@@ -407,7 +407,7 @@ async def start_pipeline():
     log.info("Starting embedded Kafka pipeline...")
     log.info("  Kafka: %s", KAFKA_BOOTSTRAP := os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"))
     log.info("  Cloud Kafka: %s", "YES (SSL)" if is_cloud_kafka() else "NO (local)")
-    log.info("  Self API: %s", SELF_BASE)
+    log.info("  Self API: %s", _get_self_base())
     log.info("  Tick interval: %ds", TICK_INTERVAL)
     log.info("  Patient poll interval: %ds", PATIENT_POLL_INTERVAL)
     log.info("═" * 50)
