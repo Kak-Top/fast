@@ -84,11 +84,9 @@ def _get_ssl_context() -> ssl.SSLContext:
     else:
         raise RuntimeError("Cloud Kafka enabled but no SSL certs found")
 
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.load_verify_locations(ca_path)
+    # Use default context which sets up SECURE defaults (including SNI)
+    ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
     ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
 
 
