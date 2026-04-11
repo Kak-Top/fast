@@ -169,34 +169,29 @@ async def _single_patient_sim_loop(patient_id: str):
 
 
 async def _patient_discovery_loop():
-    """
-    Polls the API every PATIENT_POLL_INTERVAL seconds for new patients.
-    When a new patient is found, creates a simulator and starts a
-    simulation loop for them automatically.
-    """
     global _producer
     kafka_cfg = get_kafka_config()
 
-    # Wait for FastAPI to be ready
     await asyncio.sleep(3)
     log.info("[Simulator] Starting patient discovery...")
 
-    # Start shared Kafka producer
     _producer = AIOKafkaProducer(
         **kafka_cfg,
         compression_type="gzip",
         acks="all",
     )
 
-     while True:
+    # First while loop — connect producer
+    while True:
         try:
-            # Timeout prevents infinite hang — will raise asyncio.TimeoutError
             await asyncio.wait_for(_producer.start(), timeout=15.0)
             log.info("[Simulator] Kafka producer connected")
             break
         except asyncio.TimeoutError:
-            log.error("[Simulator] Kafka producer timed out after 15s — is port reachable from Render?")
+            log.error("[Simulator] Kafka producer timed out — retrying in 5s")
             await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            return
         except Exception as e:
             log.error("[Simulator] Cannot connect Kafka producer: %s — retrying in 5s", e)
             await asyncio.sleep(5)
