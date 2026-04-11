@@ -188,13 +188,15 @@ async def _patient_discovery_loop():
         acks="all",
     )
 
-    while True:
+     while True:
         try:
-            await _producer.start()
+            # Timeout prevents infinite hang — will raise asyncio.TimeoutError
+            await asyncio.wait_for(_producer.start(), timeout=15.0)
             log.info("[Simulator] Kafka producer connected")
             break
-        except asyncio.CancelledError:
-            return
+        except asyncio.TimeoutError:
+            log.error("[Simulator] Kafka producer timed out after 15s — is port reachable from Render?")
+            await asyncio.sleep(5)
         except Exception as e:
             log.error("[Simulator] Cannot connect Kafka producer: %s — retrying in 5s", e)
             await asyncio.sleep(5)
