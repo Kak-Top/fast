@@ -40,16 +40,16 @@ logging.basicConfig(
 log = logging.getLogger("pipeline")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
-API_USERNAME = os.getenv("API_USERNAME", "dr.ahmad")
-API_PASSWORD = os.getenv("API_PASSWORD", "password123")
+API_USERNAME = os.getenv("API_USERNAME", "admin")
+API_PASSWORD = os.getenv("API_PASSWORD", "admin123")
 VITALS_TOPIC = "vitals.raw"
 LABS_TOPIC = "labs.results"
 TICK_INTERVAL = int(os.getenv("TICK_INTERVAL", "10"))
 
 # When running embedded, use localhost to POST to self
-SELF_BASE = os.getenv("SELF_BASE", "http://127.0.0.1:" + os.getenv("PORT", "8000"))
-
+def _get_self_base() -> str:
+    port = os.getenv("PORT", "10000")
+    return os.getenv("SELF_BASE", f"http://127.0.0.1:{port}")
 # ─── How often to poll the API for new patients (seconds) ────────────────────
 PATIENT_POLL_INTERVAL = int(os.getenv("PATIENT_POLL_INTERVAL", "30"))
 
