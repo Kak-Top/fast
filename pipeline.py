@@ -4,18 +4,16 @@ Embedded Pipeline — Runs Simulator + Consumers inside FastAPI
 This replaces the 3 terminal windows (simulator, vitals consumer, labs consumer)
 with background asyncio tasks that run inside your FastAPI process.
 
-All Kafka communication is REAL Kafka (Upstash cloud or local).
+All Kafka communication is REAL Kafka (Aiven cloud or local).
 Consumers POST to your existing FastAPI endpoints via HTTP (localhost).
 
 HOW TO ADD to your main.py:
     from pipeline import start_pipeline, stop_pipeline
 
-    @app.on_event("startup")
-    async def startup():
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         await start_pipeline()
-
-    @app.on_event("shutdown")
-    async def shutdown():
+        yield
         await stop_pipeline()
 """
 
@@ -45,31 +43,43 @@ API_PASSWORD = os.getenv("API_PASSWORD", "admin123")
 VITALS_TOPIC = "vitals.raw"
 LABS_TOPIC = "labs.results"
 TICK_INTERVAL = int(os.getenv("TICK_INTERVAL", "10"))
-
-# When running embedded, use localhost to POST to self
-def _get_self_base() -> str:
-    port = os.getenv("PORT", "10000")
-    return os.getenv("SELF_BASE", f"http://127.0.0.1:{port}")
-# ─── How often to poll the API for new patients (seconds) ────────────────────
 PATIENT_POLL_INTERVAL = int(os.getenv("PATIENT_POLL_INTERVAL", "30"))
+
+# ─── Self base URL — always resolved at call time, never at import time ───────
+def _get_self_base() -> str:
+    # SELF_BASE env var takes priority (set this in Render to http://127.0.0.1:10000)
+    # Falls back to PORT env var, then hardcoded 10000 (Render always uses 10000)
+    explicit = os.getenv("SELF_BASE")
+    if explicit:
+        return explicit
+    port = os.getenv("PORT", "10000")
+    # Guard against Render passing the literal string "${PORT}" before substitution
+    if not port.isdigit():
+        port = "10000"
+    return f"http://127.0.0.1:{port}"
 
 # ─── State ────────────────────────────────────────────────────────────────────
 _tasks = []
-_sim_tasks: Dict[str, asyncio.Task] = {}  # patient_id -> running simulation task
-_simulators: Dict[str, PatientSimulator] = {}  # patient_id -> simulator instance
-_producer: AIOKafkaProducer = None  # shared Kafka producer
+_sim_tasks: Dict[str, asyncio.Task] = {}
+_simulators: Dict[str, PatientSimulator] = {}
+_producer: AIOKafkaProducer = None
 _token: str = ""
 _token_issued_at: float = 0.0
-TOKEN_TTL = 55 * 60  # refresh every 55 min
+TOKEN_TTL = 55 * 60
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Auth helpers
+# ═══════════════════════════════════════════════════════════════════════════════
 
 async def _get_token(client: httpx.AsyncClient) -> str:
     """Authenticate with FastAPI and cache the token."""
     global _token, _token_issued_at
     if _token and (time.time() - _token_issued_at) < TOKEN_TTL:
         return _token
+    base = _get_self_base()
     resp = await client.post(
-        f"{_get_self_base()}/auth/login",
+        f"{base}/auth/login",
         data={"username": API_USERNAME, "password": API_PASSWORD},
     )
     resp.raise_for_status()
@@ -82,8 +92,9 @@ async def _get_token(client: httpx.AsyncClient) -> str:
 async def _fetch_patients(client: httpx.AsyncClient) -> list:
     """Fetch current patients from the API."""
     token = await _get_token(client)
+    base = _get_self_base()
     resp = await client.get(
-        f"{_get_self_base()}/icu/patients",
+        f"{base}/icu/patients",
         headers={"Authorization": f"Bearer {token}"},
     )
     resp.raise_for_status()
@@ -109,17 +120,15 @@ def _create_simulator(p: dict) -> PatientSimulator:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Simulator — publishes to Kafka (same as simulator_runner.py)
+# Simulator — publishes to Kafka
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _single_patient_sim_loop(patient_id: str):
-    """
-    Simulation loop for ONE patient. Publishes vitals every TICK_INTERVAL
-    and labs on schedule to Kafka. Runs until cancelled.
-    """
+    """Simulation loop for ONE patient. Runs until cancelled."""
     global _producer
     sim = _simulators[patient_id]
-    log.info("[Simulator] Starting loop for %s (%s) — state=%s", patient_id, sim.name, sim.state.value)
+    log.info("[Simulator] Starting loop for %s (%s) — state=%s",
+             patient_id, sim.name, sim.state.value)
 
     while True:
         try:
@@ -157,7 +166,8 @@ async def _single_patient_sim_loop(patient_id: str):
                     key=patient_id.encode(),
                     value=json.dumps(lab_msg).encode(),
                 )
-                log.info("→ labs.results | %s | glucose=%.0f", patient_id, labs["glucose"])
+                log.info("→ labs.results | %s | glucose=%.0f",
+                         patient_id, labs["glucose"])
 
         except asyncio.CancelledError:
             log.info("[Simulator] Stopped loop for %s", patient_id)
@@ -174,6 +184,7 @@ async def _patient_discovery_loop():
 
     await asyncio.sleep(3)
     log.info("[Simulator] Starting patient discovery...")
+    log.info("[Simulator] Self base URL: %s", _get_self_base())
 
     _producer = AIOKafkaProducer(
         **kafka_cfg,
@@ -181,7 +192,7 @@ async def _patient_discovery_loop():
         acks="all",
     )
 
-    # First while loop — connect producer
+    # Connect producer with timeout + retry
     while True:
         try:
             await asyncio.wait_for(_producer.start(), timeout=15.0)
@@ -205,11 +216,8 @@ async def _patient_discovery_loop():
 
                 for p in patients:
                     pid = p["patient_id"]
-                    # Skip if we're already simulating this patient
                     if pid in _sim_tasks and not _sim_tasks[pid].done():
                         continue
-
-                    # New patient! Create simulator and start loop
                     sim = _create_simulator(p)
                     _simulators[pid] = sim
                     task = asyncio.create_task(_single_patient_sim_loop(pid))
@@ -229,13 +237,13 @@ async def _patient_discovery_loop():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Vitals Consumer — reads Kafka, POSTs to FastAPI (same as vitals_consumer.py)
+# Vitals Consumer
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _vitals_consumer_loop():
     """Consumes vitals.raw, POSTs to /icu/vitals, gets AI risk, publishes to inference.output."""
     kafka_cfg = get_kafka_config()
-    await asyncio.sleep(5)  # wait for FastAPI + simulator to be ready
+    await asyncio.sleep(5)
     log.info("[VitalsConsumer] Starting...")
 
     while True:
@@ -262,13 +270,14 @@ async def _vitals_consumer_loop():
                     patient_id = data["patient_id"]
                     vitals = data["vitals"]
                     simulator_state = data.get("state", "unknown")
+                    base = _get_self_base()
 
                     try:
                         token = await _get_token(client)
 
                         # 1. POST vitals
                         resp = await client.post(
-                            f"{_get_self_base()}/icu/vitals/{patient_id}",
+                            f"{base}/icu/vitals/{patient_id}",
                             json=vitals,
                             headers={"Authorization": f"Bearer {token}"},
                             timeout=10,
@@ -277,13 +286,12 @@ async def _vitals_consumer_loop():
                         api_response = resp.json()
                         flags = api_response.get("abnormal_flags", [])
                         is_critical = api_response.get("is_critical", False)
-
                         log.info("✓ %s vitals ingested | critical=%s | flags=%d",
                                  patient_id, is_critical, len(flags))
 
                         # 2. Get AI risk
                         resp2 = await client.get(
-                            f"{_get_self_base()}/icu/ai/risk/{patient_id}",
+                            f"{base}/icu/ai/risk/{patient_id}",
                             headers={"Authorization": f"Bearer {token}"},
                             timeout=10,
                         )
@@ -306,7 +314,8 @@ async def _vitals_consumer_loop():
                         )
 
                     except httpx.HTTPStatusError as e:
-                        log.error("API error for %s: %s %s", patient_id, e.response.status_code, e.response.text[:200])
+                        log.error("API error for %s: %s %s",
+                                  patient_id, e.response.status_code, e.response.text[:200])
                     except Exception as e:
                         log.error("Error processing vitals for %s: %s", patient_id, e)
 
@@ -327,7 +336,7 @@ async def _vitals_consumer_loop():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Labs Consumer — reads Kafka, POSTs to FastAPI (same as labs_consumer.py)
+# Labs Consumer
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _labs_consumer_loop():
@@ -355,11 +364,12 @@ async def _labs_consumer_loop():
                     data = msg.value
                     patient_id = data["patient_id"]
                     labs = data["labs"]
+                    base = _get_self_base()
 
                     try:
                         token = await _get_token(client)
                         resp = await client.post(
-                            f"{_get_self_base()}/icu/labs/{patient_id}",
+                            f"{base}/icu/labs/{patient_id}",
                             json=labs,
                             headers={"Authorization": f"Bearer {token}"},
                             timeout=10,
@@ -373,7 +383,8 @@ async def _labs_consumer_loop():
                             len(result.get("abnormal_flags", [])),
                         )
                     except httpx.HTTPStatusError as e:
-                        log.error("API error for %s: %s %s", patient_id, e.response.status_code, e.response.text[:200])
+                        log.error("API error for %s: %s %s",
+                                  patient_id, e.response.status_code, e.response.text[:200])
                     except Exception as e:
                         log.error("Error posting labs for %s: %s", patient_id, e)
 
@@ -392,20 +403,14 @@ async def _labs_consumer_loop():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Public API — call from main.py startup/shutdown
+# Public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def start_pipeline():
-    """
-    Start all pipeline tasks (patient discovery + consumers).
-    Call from your FastAPI startup event.
-
-    The patient discovery loop polls your API every PATIENT_POLL_INTERVAL
-    seconds and auto-starts simulation for any new patients it finds.
-    """
+    """Start all pipeline tasks. Call from FastAPI lifespan."""
     log.info("═" * 50)
     log.info("Starting embedded Kafka pipeline...")
-    log.info("  Kafka: %s", KAFKA_BOOTSTRAP := os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"))
+    log.info("  Kafka: %s", os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"))
     log.info("  Cloud Kafka: %s", "YES (SSL)" if is_cloud_kafka() else "NO (local)")
     log.info("  Self API: %s", _get_self_base())
     log.info("  Tick interval: %ds", TICK_INTERVAL)
@@ -418,14 +423,10 @@ async def start_pipeline():
 
 
 async def stop_pipeline():
-    """
-    Stop all pipeline tasks + per-patient simulation tasks.
-    Call from your FastAPI shutdown event.
-    """
+    """Stop all pipeline tasks. Call from FastAPI lifespan."""
     global _producer
     log.info("Stopping pipeline tasks...")
 
-    # Cancel per-patient simulation tasks
     for pid, task in _sim_tasks.items():
         task.cancel()
     if _sim_tasks:
@@ -433,13 +434,11 @@ async def stop_pipeline():
     _sim_tasks.clear()
     _simulators.clear()
 
-    # Cancel main tasks (discovery + consumers)
     for task in _tasks:
         task.cancel()
     await asyncio.gather(*_tasks, return_exceptions=True)
     _tasks.clear()
 
-    # Stop shared Kafka producer
     if _producer:
         try:
             await _producer.stop()
