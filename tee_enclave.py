@@ -145,10 +145,14 @@ class TEEEnclave:
         Called once at startup, and after every mutation.
         Returns the HMAC proof for audit logging.
         """
+        import copy
         with self._lock:
-            self._sealed = self._create_sealed(state)
+            # Create a detached snapshot of the live state
+            # This ensures pipeline updates to live_state don't mutate the sealed data
+            snapshot = copy.deepcopy(state)
+            self._sealed = self._create_sealed(snapshot)
             log.info(
-                "✓ TEE state sealed — version=%d proof=%s…",
+                "✓ TEE state sealed (snapshot taken) — version=%d proof=%s…",
                 self._version,
                 self._sealed["proof"][:16],
             )
