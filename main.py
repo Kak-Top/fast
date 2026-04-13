@@ -9,6 +9,7 @@ from routers.realtime_router import router as realtime_router, _kafka_inference_
 from pipeline import start_pipeline, stop_pipeline  
 from tee_enclave import get_enclave                      
 from routers.tee_router import router as tee_router 
+from dependencies import fake_patients_db, fake_resources_db
 
 async def keep_alive():
     await asyncio.sleep(30)
