@@ -3,7 +3,11 @@ import random
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from datetime import datetime
-from dependencies import fake_patients_db, fake_vitals_db, get_current_user
+from dependencies import get_current_user
+from database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from models import Patient, Vital
+from sqlalchemy.future import select
 
 router = APIRouter()
 
@@ -19,14 +23,14 @@ NORMAL_RANGES = {
 
 def is_critical(vitals: dict) -> bool:
     for key, (low, high) in NORMAL_RANGES.items():
-        if key in vitals and not (low <= vitals[key] <= high):
+        if key in vitals and vitals[key] is not None and not (low <= vitals[key] <= high):
             return True
     return False
 
 def flag_abnormal_params(vitals: dict) -> list:
     flags = []
     for key, (low, high) in NORMAL_RANGES.items():
-        if key in vitals and not (low <= vitals[key] <= high):
+        if key in vitals and vitals[key] is not None and not (low <= vitals[key] <= high):
             flags.append({
                 "parameter": key,
                 "value": vitals[key],
@@ -46,180 +50,139 @@ class VitalsReading(BaseModel):
 
 # ── POST /icu/vitals/{patient_id} ─────────────────────────────────────────────
 @router.post("/vitals/{patient_id}", summary="Push a new vitals reading")
-def push_vitals(
+async def push_vitals(
     patient_id: str,
     body: VitalsReading,
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """
-    Ingest a new vitals reading for a patient (from IoT sensor or simulation).
-    Automatically flags any out-of-range parameters.
-
-    **Sample Request Body:**
-    ```json
-    {
-      "heart_rate": 118,
-      "blood_pressure_sys": 85,
-      "blood_pressure_dia": 52,
-      "spo2": 89,
-      "respiratory_rate": 28,
-      "temperature": 39.1
-    }
-    ```
-
-    **Sample Response:**
-    ```json
-    {
-      "patient_id": "P001",
-      "timestamp": "2025-03-02T09:00:00",
-      "vitals": { ... },
-      "is_critical": true,
-      "abnormal_flags": [
-        {
-          "parameter": "spo2",
-          "value": 89,
-          "normal_range": "95–100",
-          "severity": "CRITICAL"
-        },
-        {
-          "parameter": "respiratory_rate",
-          "value": 28,
-          "normal_range": "12–20",
-          "severity": "WARNING"
-        }
-      ]
-    }
-    ```
+    Ingest a new vitals reading for a patient.
     """
-    if patient_id not in fake_patients_db:
+    query = await db.execute(select(Patient).where(Patient.patient_id == patient_id))
+    patient = query.scalar_one_or_none()
+    if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    reading = body.dict()
-    reading["timestamp"] = datetime.utcnow().isoformat()
-
-    fake_vitals_db.setdefault(patient_id, []).append(reading)
+    reading_dict = body.dict()
+    reading_dict["timestamp"] = datetime.utcnow().isoformat()
+    
+    # Insert vital
+    vital = Vital(
+        patient_id=patient_id,
+        heart_rate=body.heart_rate,
+        blood_pressure_sys=body.blood_pressure_sys,
+        blood_pressure_dia=body.blood_pressure_dia,
+        spo2=body.spo2,
+        respiratory_rate=body.respiratory_rate,
+        temperature=body.temperature
+    )
+    db.add(vital)
 
     # Update patient status
-    status = "critical" if is_critical(reading) else "stable"
-    fake_patients_db[patient_id]["status"] = status
+    status = "critical" if is_critical(reading_dict) else "stable"
+    patient.status = status
+    await db.commit()
 
     return {
         "patient_id": patient_id,
-        "timestamp": reading["timestamp"],
-        "vitals": body.dict(),
-        "is_critical": is_critical(reading),
-        "abnormal_flags": flag_abnormal_params(reading),
+        "timestamp": reading_dict["timestamp"],
+        "vitals": reading_dict,
+        "is_critical": is_critical(reading_dict),
+        "abnormal_flags": flag_abnormal_params(reading_dict),
     }
 
 
 # ── GET /icu/vitals/{patient_id}/history ──────────────────────────────────────
 @router.get("/vitals/{patient_id}/history", summary="Get historical vitals for a patient")
-def get_vitals_history(
+async def get_vitals_history(
     patient_id: str,
     limit: int = 10,
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Returns the last N vitals readings for a patient (default 10).
-
-    **Sample Response:**
-    ```json
-    {
-      "patient_id": "P001",
-      "total_readings": 2,
-      "readings": [
-        {
-          "timestamp": "2025-03-02T08:00:00",
-          "heart_rate": 112,
-          "blood_pressure_sys": 88,
-          "spo2": 91,
-          "respiratory_rate": 26,
-          "temperature": 38.9
-        }
-      ]
-    }
-    ```
     """
-    if patient_id not in fake_patients_db:
+    query = await db.execute(select(Patient).where(Patient.patient_id == patient_id))
+    if not query.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    history = fake_vitals_db.get(patient_id, [])
+    vitals_query = await db.execute(
+        select(Vital).where(Vital.patient_id == patient_id).order_by(Vital.timestamp.desc()).limit(limit)
+    )
+    history = vitals_query.scalars().all()
+    history = list(reversed(history)) # Return oldest to newest conceptually if desired, or keep desc.
+
+    readings = []
+    for v in history:
+        readings.append({
+            "timestamp": v.timestamp.isoformat(),
+            "heart_rate": v.heart_rate,
+            "blood_pressure_sys": v.blood_pressure_sys,
+            "blood_pressure_dia": v.blood_pressure_dia,
+            "spo2": v.spo2,
+            "respiratory_rate": v.respiratory_rate,
+            "temperature": v.temperature
+        })
+
     return {
         "patient_id": patient_id,
         "total_readings": len(history),
-        "readings": history[-limit:],
+        "readings": readings,
     }
 
 
 # ── GET /icu/vitals/critical ───────────────────────────────────────────────────
 @router.get("/vitals/critical", summary="Get all patients with critical vitals")
-def get_critical_patients(current_user=Depends(get_current_user)):
+async def get_critical_patients(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """
-    Returns all ICU patients that currently have one or more out-of-range vital signs.
-
-    **Sample Response:**
-    ```json
-    {
-      "critical_count": 1,
-      "patients": [
-        {
-          "patient_id": "P001",
-          "name": "Khalid Al-Mansouri",
-          "bed_id": "ICU-01",
-          "status": "critical",
-          "latest_vitals": { ... },
-          "abnormal_flags": [
-            { "parameter": "spo2", "value": 89, "normal_range": "95–100", "severity": "CRITICAL" }
-          ]
-        }
-      ]
-    }
-    ```
+    Returns all ICU patients that currently have a 'critical' status.
     """
-    critical = []
-    for pid, patient in fake_patients_db.items():
-        history = fake_vitals_db.get(pid, [])
-        if not history:
-            continue
-        latest = history[-1]
-        flags = flag_abnormal_params(latest)
-        if flags:
-            critical.append({
-                **patient,
-                "latest_vitals": latest,
-                "abnormal_flags": flags,
-            })
+    query = await db.execute(select(Patient).where(Patient.status == "critical"))
+    critical_patients = query.scalars().all()
 
-    return {"critical_count": len(critical), "patients": critical}
+    result = []
+    for patient in critical_patients:
+        # Fetch their latest vitals
+        v_query = await db.execute(select(Vital).where(Vital.patient_id == patient.patient_id).order_by(Vital.timestamp.desc()).limit(1))
+        latest = v_query.scalar_one_or_none()
+        
+        latest_dict = None
+        flags = []
+        if latest:
+            latest_dict = {
+                "heart_rate": latest.heart_rate,
+                "blood_pressure_sys": latest.blood_pressure_sys,
+                "blood_pressure_dia": latest.blood_pressure_dia,
+                "spo2": latest.spo2,
+                "respiratory_rate": latest.respiratory_rate,
+                "temperature": latest.temperature,
+                "timestamp": latest.timestamp.isoformat() if latest.timestamp else None
+            }
+            flags = flag_abnormal_params(latest_dict)
+
+        result.append({
+            "patient_id": patient.patient_id,
+            "name": patient.name,
+            "bed_id": patient.bed_id,
+            "status": patient.status,
+            "latest_vitals": latest_dict,
+            "abnormal_flags": flags
+        })
+
+    return {"critical_count": len(result), "patients": result}
 
 
 # ── WebSocket /ws/icu/vitals/{patient_id} ─────────────────────────────────────
 @router.websocket("/vitals/ws/{patient_id}")
 async def vitals_stream(websocket: WebSocket, patient_id: str):
     """
-    Live vitals stream for a patient. Sends a new simulated reading every 3 seconds.
-
-    Connect with: `ws://localhost:8000/icu/vitals/ws/P001`
-
-    **Sample streamed message:**
-    ```json
-    {
-      "patient_id": "P001",
-      "timestamp": "2025-03-02T09:01:00",
-      "heart_rate": 115,
-      "blood_pressure_sys": 87,
-      "blood_pressure_dia": 54,
-      "spo2": 90,
-      "respiratory_rate": 27,
-      "temperature": 39.0,
-      "is_critical": true
-    }
-    ```
+    Live vitals stream for a patient.
     """
     await websocket.accept()
     try:
         while True:
-            # Simulate a reading (replace with real sensor pull)
             reading = {
                 "patient_id": patient_id,
                 "timestamp": datetime.utcnow().isoformat(),
