@@ -20,13 +20,11 @@ import markdown2
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from datetime import datetime
-from dependencies import (
-    fake_patients_db,
-    fake_vitals_db,
-    fake_resources_db,
-    fake_siem_events_db,
-    get_current_user,
-)
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from database import get_db
+from models import Patient, Vital, Resource
+from dependencies import get_current_user, fake_siem_events_db
 
 router = APIRouter()
 chat_sessions: dict = {}
@@ -116,30 +114,38 @@ def _classify_query(question: str) -> str:
 
 
 # ── ICU context ───────────────────────────────────────────────────────────────
-def _build_icu_context() -> str:
-    patients = list(fake_patients_db.values())
-    resources = list(fake_resources_db.values())
+async def _build_icu_context(db: AsyncSession) -> str:
+    # Fetch live patients
+    p_query = await db.execute(select(Patient))
+    patients = p_query.scalars().all()
+    
+    # Fetch live resources
+    r_query = await db.execute(select(Resource))
+    resources = r_query.scalars().all()
 
-    critical = [p for p in patients if p.get("status") == "critical"]
-    stable = [p for p in patients if p.get("status") == "stable"]
+    critical = [p for p in patients if p.status == "critical"]
+    stable = [p for p in patients if p.status == "stable"]
 
     vitals_lines = []
     for p in patients:
-        history = fake_vitals_db.get(p["patient_id"], [])
-        if history:
-            v = history[-1]
+        v_query = await db.execute(
+            select(Vital).where(Vital.patient_id == p.patient_id).order_by(Vital.timestamp.desc()).limit(1)
+        )
+        v = v_query.scalar_one_or_none()
+        if v:
             vitals_lines.append(
-                f"{p['name']} (Bed {p['bed_id']}, {p['status'].upper()}): "
-                f"HR {v.get('heart_rate')} bpm | SpO2 {v.get('spo2')}% | "
-                f"BP {v.get('blood_pressure_sys')}/{v.get('blood_pressure_dia')} mmHg | "
-                f"Temp {v.get('temperature')}°C | RR {v.get('respiratory_rate')}/min"
+                f"{p.name} (Bed {p.bed_id}, {(p.status or 'unknown').upper()}): "
+                f"HR {v.heart_rate} bpm | SpO2 {v.spo2}% | "
+                f"BP {v.blood_pressure_sys}/{v.blood_pressure_dia} mmHg | "
+                f"Temp {v.temperature}°C | RR {v.respiratory_rate}/min"
             )
 
-    beds_avail = sum(1 for r in resources if r["type"] == "bed" and r["status"] == "available")
-    vents_avail = sum(1 for r in resources if r["type"] == "ventilator" and r["status"] == "available")
-    total_beds = sum(1 for r in resources if r["type"] == "bed")
-    total_vents = sum(1 for r in resources if r["type"] == "ventilator")
+    beds_avail = sum(1 for r in resources if r.type == "bed" and r.status == "available")
+    vents_avail = sum(1 for r in resources if r.type == "ventilator" and r.status == "available")
+    total_beds = sum(1 for r in resources if r.type == "bed")
+    total_vents = sum(1 for r in resources if r.type == "ventilator")
 
+    # SIEM events aren't in DB yet, so keep the fake dict for this one
     recent_siem = fake_siem_events_db[-3:] if fake_siem_events_db else []
     siem_lines = [
         f"[{e.get('severity')}] {e.get('event_type')}: {e.get('description')}"
@@ -148,7 +154,7 @@ def _build_icu_context() -> str:
 
     lines = [
         f"Patients: {len(patients)} total | Critical: {len(critical)} "
-        f"({', '.join(p['name'] for p in critical) or 'none'}) | Stable: {len(stable)}",
+        f"({', '.join(p.name for p in critical) or 'none'}) | Stable: {len(stable)}",
         f"Resources: {beds_avail}/{total_beds} beds free | {vents_avail}/{total_vents} ventilators free",
     ]
     if vitals_lines:
@@ -160,8 +166,8 @@ def _build_icu_context() -> str:
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
-def _build_system_prompt(query_type: str) -> str:
-    icu_context = _build_icu_context()
+async def _build_system_prompt(query_type: str, db: AsyncSession) -> str:
+    icu_context = await _build_icu_context(db)
 
     if query_type == "code":
         depth_note = """You are helping with code. Provide clean, well-commented examples.
@@ -503,39 +509,45 @@ def _md_to_html(text: str) -> str:
 
 
 # ── Fallback keyword engine ───────────────────────────────────────────────────
-def _fallback_engine(question: str) -> str:
+async def _fallback_engine(question: str, db: AsyncSession) -> str:
     q = question.lower()
+    
+    r_query = await db.execute(select(Resource))
+    all_resources = r_query.scalars().all()
+    
+    p_query = await db.execute(select(Patient))
+    all_patients = p_query.scalars().all()
 
     if any(w in q for w in ["bed", "beds", "capacity"]):
-        beds = [r for r in fake_resources_db.values() if r["type"] == "bed"]
-        available = sum(1 for b in beds if b["status"] == "available")
+        beds = [r for r in all_resources if r.type == "bed"]
+        available = sum(1 for b in beds if b.status == "available")
         return (
             f"**Bed Status**: {available} of {len(beds)} ICU beds are currently available "
             f"({len(beds) - available} occupied)."
         )
 
     if "ventilator" in q:
-        vents = [r for r in fake_resources_db.values() if r["type"] == "ventilator"]
-        available = sum(1 for v in vents if v["status"] == "available")
+        vents = [r for r in all_resources if r.type == "ventilator"]
+        available = sum(1 for v in vents if v.status == "available")
         return f"**Ventilators**: {available} of {len(vents)} are currently available."
 
     if any(w in q for w in ["critical", "deteriorat", "at risk", "danger"]):
-        critical = [p for p in fake_patients_db.values() if p["status"] == "critical"]
+        critical = [p for p in all_patients if p.status == "critical"]
         if critical:
-            names = ", ".join(p["name"] for p in critical)
+            names = ", ".join(p.name for p in critical)
             return f"**{len(critical)} critical patient(s)** currently: {names}."
         return "No patients are currently flagged as critical."
 
     if "sepsis" in q or "risk" in q:
-        high_risk = [
-            p["name"]
-            for pid, p in fake_patients_db.items()
-            if fake_vitals_db.get(pid)
-            and (
-                fake_vitals_db[pid][-1].get("spo2", 100) < 92
-                or fake_vitals_db[pid][-1].get("blood_pressure_sys", 120) < 90
+        high_risk = []
+        for p in all_patients:
+            v_query = await db.execute(
+                select(Vital).where(Vital.patient_id == p.patient_id).order_by(Vital.timestamp.desc()).limit(1)
             )
-        ]
+            v = v_query.scalar_one_or_none()
+            if v and (v.spo2 < 92 or v.blood_pressure_sys < 90):
+                high_risk.append(p.name)
+                
         if high_risk:
             return (
                 f"**High sepsis risk**: {', '.join(high_risk)}. "
@@ -545,15 +557,15 @@ def _fallback_engine(question: str) -> str:
 
     if any(w in q for w in ["summary", "status", "overview", "how many"]):
         beds_avail = sum(
-            1 for r in fake_resources_db.values()
-            if r["type"] == "bed" and r["status"] == "available"
+            1 for r in all_resources
+            if r.type == "bed" and r.status == "available"
         )
         vents_avail = sum(
-            1 for r in fake_resources_db.values()
-            if r["type"] == "ventilator" and r["status"] == "available"
+            1 for r in all_resources
+            if r.type == "ventilator" and r.status == "available"
         )
         return (
-            f"**ICU Overview**: {len(fake_patients_db)} patients | "
+            f"**ICU Overview**: {len(all_patients)} patients | "
             f"{beds_avail} beds free | {vents_avail} ventilators free."
         )
 
@@ -565,11 +577,11 @@ def _fallback_engine(question: str) -> str:
 
 
 # ── OpenRouter call ───────────────────────────────────────────────────────────
-async def _ask_llm(question: str, session_id: str) -> tuple[str, str, str]:
+async def _ask_llm(question: str, session_id: str, db: AsyncSession) -> tuple[str, str, str]:
     """Returns (html_answer, raw_answer, model_used)"""
 
     if not OPENROUTER_API_KEY:
-        raw = _fallback_engine(question)
+        raw = await _fallback_engine(question, db)
         return _md_to_html(raw), raw, "fallback-keyword-engine"
 
     query_type = _classify_query(question)
@@ -587,7 +599,7 @@ async def _ask_llm(question: str, session_id: str) -> tuple[str, str, str]:
         max_tokens = 500
         temperature = 0.5
 
-    system_prompt = _build_system_prompt(query_type)
+    system_prompt = await _build_system_prompt(query_type, db)
     history = chat_sessions.get(session_id, [])
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -640,18 +652,18 @@ async def _ask_llm(question: str, session_id: str) -> tuple[str, str, str]:
                 print(f"✗ {model} → {type(e).__name__}: {e}, trying next")
 
     print("⚠️ All models failed, using fallback engine")
-    raw = _fallback_engine(question)
+    raw = await _fallback_engine(question, db)
     return _md_to_html(raw), raw, "fallback-keyword-engine"
 
 
 # ── POST /chatbot/query ───────────────────────────────────────────────────────
 @router.post("/query", summary="Ask the AI assistant anything")
-async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user)):
+async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """
     Ask anything — ICU data, medical questions, code help, general knowledge.
     Returns HTML-formatted answer ready to render in the frontend.
     """
-    answer_html, answer_raw, model_used = await _ask_llm(body.question, body.session_id)
+    answer_html, answer_raw, model_used = await _ask_llm(body.question, body.session_id, db)
 
     if body.session_id not in chat_sessions:
         chat_sessions[body.session_id] = []
@@ -661,7 +673,7 @@ async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user))
         "answer": answer_html,
         "answer_raw": answer_raw,
         "timestamp": datetime.utcnow().isoformat(),
-        "asked_by": current_user["username"],
+        "asked_by": current_user.username,
         "model": model_used,
     }
     chat_sessions[body.session_id].append(entry)
@@ -706,5 +718,5 @@ def clear_history(
     return {
         "message": "Session cleared.",
         "session_id": session_id,
-        "cleared_by": current_user["username"],
+        "cleared_by": current_user.username,
     }
