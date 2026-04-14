@@ -673,7 +673,7 @@ async def chatbot_query(body: ChatQuery, current_user=Depends(get_current_user),
         "answer": answer_html,
         "answer_raw": answer_raw,
         "timestamp": datetime.utcnow().isoformat(),
-        "asked_by": current_user.username,
+        "asked_by": current_user["username"],
         "model": model_used,
     }
     chat_sessions[body.session_id].append(entry)
@@ -718,5 +718,5 @@ def clear_history(
     return {
         "message": "Session cleared.",
         "session_id": session_id,
-        "cleared_by": current_user.username,
+        "cleared_by": current_user["username"],
     }
