@@ -115,7 +115,12 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
+from database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from models import User
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -131,10 +136,20 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise credentials_exception
 
-    user = fake_users_db.get(username)
+    query = await db.execute(select(User).where(User.username == username))
+    user = query.scalar_one_or_none()
+    
     if user is None:
         raise credentials_exception
-    return user
+        
+    return {
+        "user_id": user.user_id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "role": user.role,
+        "hashed_password": user.hashed_password,
+        "disabled": user.disabled
+    }
 
 def require_role(*roles):
     def checker(current_user=Depends(get_current_user)):
