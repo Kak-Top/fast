@@ -105,6 +105,8 @@ manager = _ConnectionManager()
 
 # ─── Kafka background task ────────────────────────────────────────────────────
 
+# ─── Kafka background task ────────────────────────────────────────────────────
+
 _kafka_task: Optional[asyncio.Task] = None
 
 
@@ -112,7 +114,8 @@ async def _kafka_inference_listener():
     """
     Background coroutine that reads inference.output from Kafka
     and broadcasts each message to subscribed WebSocket clients.
-    Runs for the lifetime of the FastAPI app (started in startup event).
+    
+     ENHANCED: Now includes TurboQuant compression metadata for UI badges
     """
     try:
         from aiokafka import AIOKafkaConsumer
@@ -140,6 +143,26 @@ async def _kafka_inference_listener():
                 if not patient_id:
                     continue
 
+                #  NEW: Try to get TurboQuant metadata from cache (if available)
+                turboquant_meta = {}
+                try:
+                    from engine.cache import EncryptedKVCache
+                    cache = EncryptedKVCache()
+                    encoded = cache.get(patient_id)
+                    if encoded:
+                        turboquant_meta = {
+                            "turboquant_enabled": True,
+                            "compression_ratio": encoded["stats"]["compression_ratio"],
+                            "vram_saved_percent": encoded["stats"]["vram_saved_percent"],
+                            "encoding_latency_ms": encoded["metadata"]["encoding_latency_ms"],
+                            "badge_text": f" {encoded['stats']['compression_ratio']} compression",
+                            "secure_computation": True
+                        }
+                except Exception as tq_error:
+                    # Safe fallback - don't break broadcast if TurboQuant fails
+                    log.debug(f"TurboQuant metadata not available: {tq_error}")
+                    turboquant_meta = {"turboquant_enabled": False}
+
                 # Shape the payload for the UI
                 ui_payload = {
                     "type": "update",
@@ -150,13 +173,26 @@ async def _kafka_inference_listener():
                     "is_critical": data.get("vitals_response", {}).get("is_critical", False),
                     "simulator_state": data.get("simulator_state"),
                     "timestamp": data.get("timestamp"),
+                    #  ADD TurboQuant metadata for "WOW" UI badges
+                    "turboquant": turboquant_meta,
                 }
 
                 # Also include latest labs if we have them
                 if patient_id in _latest_labs:
                     ui_payload["labs"] = _latest_labs[patient_id]["labs"]
 
+                # Broadcast to WebSocket clients
                 await manager.broadcast(patient_id, ui_payload)
+                
+                # Log for monitoring
+                if turboquant_meta.get("turboquant_enabled"):
+                    log.debug(
+                        " Broadcast %s: risk=%.2f | %s | %s",
+                        patient_id,
+                        data.get("risk", {}).get("score", 0),
+                        turboquant_meta["compression_ratio"],
+                        turboquant_meta["badge_text"]
+                    )
 
         except asyncio.CancelledError:
             log.info("Kafka inference listener shutting down")
