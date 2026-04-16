@@ -15,6 +15,8 @@ Set these 3 environment variables in Render dashboard:
 1. Put ca.pem, service.cert, service.key inside a certs/ folder next to this file.
 2. Set KAFKA_BOOTSTRAP in your .env or shell.
 That's it — the local certs/ folder is auto-detected.
+
+✅ ENHANCED: Optional TurboQuant compression hook for vitals stream
 """
 
 import base64
@@ -80,7 +82,7 @@ def _get_ssl_context() -> ssl.SSLContext:
         log.info("Using Kafka SSL certs from local 'certs/' directory")
         ca_path   = DEFAULT_CA
         cert_path = DEFAULT_CERT
-        key_path  = DEFAULT_KEY
+        key_path = DEFAULT_KEY
 
         # Give a clear error if files are missing locally too
         for label, path in [("CA", ca_path), ("cert", cert_path), ("key", key_path)]:
@@ -125,3 +127,72 @@ def get_kafka_config() -> dict:
         )
 
     return config
+
+
+# ── ✅ NEW: TurboQuant Compression Hook (Optional, Non-Breaking) ──────────────
+# This function can be called by your Kafka consumer to compress vitals inline.
+# If TurboQuant is not installed, it returns the original message unchanged.
+
+def try_compress_vitals_with_turboquant(vitals_message: dict, patient_id: str = None) -> dict:
+    """
+    Optional: Compress vitals to 3-bit tokens using TurboQuant.
+    
+    Args:
+        vitals_message: Raw vitals dict from Kafka
+        patient_id: Patient identifier (extracted from message if not provided)
+    
+    Returns:
+        Same vitals_message dict, with optional 'turboquant' metadata added.
+        If TurboQuant is unavailable, returns message unchanged.
+    """
+    # ✅ Safe import - won't break if engine/ doesn't exist yet
+    try:
+        from engine.turbo_quant import PolarQuantEncoder
+        from engine.cache import EncryptedKVCache
+    except ImportError:
+        # TurboQuant not installed - return original message
+        return vitals_message
+    
+    try:
+        patient_id = patient_id or vitals_message.get("patient_id")
+        if not patient_id:
+            return vitals_message  # Can't compress without patient_id
+        
+        # Extract 8 vital features for encoding
+        vital_array = [
+            vitals_message.get("heart_rate") or 80,
+            vitals_message.get("spo2") or 100,
+            vitals_message.get("temperature") or 37,
+            vitals_message.get("respiratory_rate") or 16,
+            vitals_message.get("blood_pressure_sys") or 120,
+            vitals_message.get("blood_pressure_dia") or 80,
+            vitals_message.get("weight_kg") or 3.0,
+            vitals_message.get("gestational_age_weeks") or 38
+        ]
+        
+        # Encode to 3-bit tokens
+        encoder = PolarQuantEncoder(input_dim=8)
+        encoded = encoder.encode(vital_array, patient_id=patient_id)
+        
+        # Cache compressed tokens for AI inference reuse
+        cache = EncryptedKVCache()
+        cache.store(patient_id, encoded)
+        
+        # ✅ Attach TurboQuant metadata to message (for downstream/UI)
+        vitals_message["turboquant"] = {
+            "enabled": True,
+            "compression_ratio": encoded["stats"]["compression_ratio"],
+            "vram_saved_percent": encoded["stats"]["vram_saved_percent"],
+            "encoding_latency_ms": encoded["metadata"]["encoding_latency_ms"],
+            "bitstream_size_bytes": len(encoded["bitstream"]),
+            "secure_computation": True
+        }
+        
+        log.debug(f"🗜️ Compressed {patient_id}: {encoded['stats']['compression_ratio']}")
+        return vitals_message
+        
+    except Exception as e:
+        # ✅ Never break the pipeline - just log and return original
+        log.warning(f"⚠️ TurboQuant compression skipped: {e}")
+        return vitals_message
+# ─────────────────────────────────────────────────────────────────────────────
