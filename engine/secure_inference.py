@@ -32,14 +32,10 @@ class SecureInferenceHead:
     def _init_model_weights(self):
         """Model weights for sepsis risk prediction"""
         self.risk_weights = np.array([
-            0.15,  # heart_rate
-            -0.20, # spo2
-            0.10,  # temperature
-            0.12,  # resp_rate
-            0.08,  # bp_sys
-            0.05,  # bp_dia
-            -0.05, # weight_kg
-            -0.10  # gestational_age
+            0.25,  # polar_feature_1
+            -0.20, # polar_feature_2
+            0.15,  # polar_feature_3
+            -0.10  # polar_feature_4
         ], dtype=np.float32)
     
     def _dequantize_tokens(self, bitstream: bytes) -> List[float]:
@@ -82,3 +78,23 @@ class SecureInferenceHead:
         if score < 0.3: return 'LOW'
         elif score < 0.7: return 'MEDIUM'
         else: return 'HIGH'
+
+    def predict_los(self, encoded_vitals: Dict) -> Dict:
+        """Simulate secure length-of-stay prediction on 3-bit tokens"""
+        start_time = time.time()
+        dequantized = self._dequantize_tokens(encoded_vitals['bitstream'])
+        
+        # Simple simulated securely computed LOS (placeholder weights)
+        encrypted_vector = ts.ckks_vector(self.context, dequantized)
+        encrypted_score = encrypted_vector.dot([1.5, 0.8, -1.2, 0.5])
+        predicted_days = max(1.0, round(float(encrypted_score.decrypt()[0]), 1))
+        
+        return {
+            'predicted_los_days': predicted_days,
+            'factors': ["Securely computed from compressed latent space"],
+            'inference_metadata': {
+                'latency_ms': round((time.time() - start_time) * 1000, 2),
+                'ckks_depth_used': 1,
+                'secure_computation': True
+            }
+        }
