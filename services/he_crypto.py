@@ -5,6 +5,8 @@ Provides CKKS homomorphic encryption for vitals data.
 Integrates with existing engine/secure_inference.py CKKS if available.
 Falls back to standalone TenSEAL or AES-based encryption.
 NO SIEM dependencies.
+
+UPDATED: Lighter CKKS parameters for Render free tier (512MB RAM).
 """
 
 import os
@@ -49,8 +51,9 @@ class HEContext:
 
     Priority:
     1. engine.secure_inference (existing CKKS in your codebase)
-    2. TenSEAL CKKS (full homomorphic encryption)
+    2. TenSEAL CKKS (light mode for Render free tier)
     3. AES encryption (confidentiality + HMAC integrity)
+    4. Simulation (base64 only - NO security)
     """
 
     def __init__(self):
@@ -74,28 +77,30 @@ class HEContext:
             except Exception as e:
                 logger.warning(f"engine.secure_inference init failed: {e}")
 
-        # Strategy 2: TenSEAL CKKS
+        # Strategy 2: TenSEAL CKKS (LIGHTER parameters for Render free tier)
         if HAS_TENSEAL:
             try:
                 self._ts_context = ts.context(
                     ts.SCHEME_TYPE.CKKS,
-                    poly_modulus_degree=8192,
-                    coeff_mod_bit_sizes=[60, 40, 40, 60]
+                    poly_modulus_degree=4096,          # ← REDUCED from 8192 (faster, less RAM)
+                    coeff_mod_bit_sizes=[40, 20, 40]   # ← SIMPLIFIED (safe for 4096)
                 )
-                self._ts_context.generate_galois_keys()
-                self._ts_context.global_scale = 2**40
+                # Skip Galois keys — they're huge and slow to generate
+                # We only need them for vector rotation, which we don't use
+                self._ts_context.generate_relin_keys()
+                self._ts_context.global_scale = 2**20  # ← Matched to coeff_mod
 
                 # Serialize public key for frontend
                 pub_bytes = self._ts_context.serialize(
                     save_public_key=True,
                     save_secret_key=False,
-                    save_galois_keys=True,
+                    save_galois_keys=False,    # ← Skip Galois keys (saves huge memory/time)
                     save_relin_keys=True,
                 )
                 self._public_key_b64 = base64.b64encode(pub_bytes).decode()
 
                 self.mode = "tenseal_ckks"
-                logger.info("✓ HE using TenSEAL CKKS context")
+                logger.info("✓ HE using TenSEAL CKKS context (light mode for Render)")
                 return
             except Exception as e:
                 logger.warning(f"TenSEAL CKKS init failed: {e}")
