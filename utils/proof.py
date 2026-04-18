@@ -12,7 +12,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from starlette.requests import Request  
+from starlette.requests import Request
 
 
 # Enclave Master Key — shared across all TEE services
@@ -75,11 +75,12 @@ def verify_seal(sealed: Dict[str, Any]) -> bool:
         )
 
     return is_valid
-    
-    def tee_response(data: Any, request: Request = None) -> Dict[str, Any]:
+
+
+def tee_response(data: Any, request: Request = None) -> Dict[str, Any]:
     """
     Wrap ANY response data in a TEE-protected envelope.
-    
+
     Input:  {"name": "Ahmad", "age": 67, "diagnosis": "..."}
     Output: {
         "data": {...},
@@ -90,10 +91,10 @@ def verify_seal(sealed: Dict[str, Any]) -> bool:
     }
     """
     from services.merkle_audit import get_merkle_tree
-    
+
     # Seal the data with HMAC proof
     sealed = seal_data(data)
-    
+
     # Get current Merkle root (proves audit trail state)
     try:
         merkle = get_merkle_tree()
@@ -102,7 +103,7 @@ def verify_seal(sealed: Dict[str, Any]) -> bool:
     except Exception:
         sealed["merkle_root"] = "unavailable"
         sealed["audit_entry_count"] = 0
-    
+
     # Get threat score from gateway middleware (if available)
     if request and hasattr(request.state, "threat_score"):
         sealed["threat_score"] = request.state.threat_score
@@ -110,11 +111,10 @@ def verify_seal(sealed: Dict[str, Any]) -> bool:
     else:
         sealed["threat_score"] = None
         sealed["threat_type"] = None
-    
+
     return sealed
 
 
 def generate_nonce() -> str:
     """Generate a random nonce for additional security."""
-    import secrets
     return secrets.token_hex(16)
