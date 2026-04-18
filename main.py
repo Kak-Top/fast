@@ -8,10 +8,12 @@ from routers import auth, patients, vitals, resources, ai, siem, chatbot
 from routers.realtime_router import router as realtime_router, _kafka_inference_listener
 from pipeline import start_pipeline, stop_pipeline  
 from tee_enclave import get_enclave                      
-from routers.tee_router import router as tee_router 
 from dependencies import fake_patients_db, fake_resources_db
+from routers.tee import router as tee_router
+from middleware.tee_gateway import TEEGatewayMiddleware
 
 async def keep_alive():
+
     await asyncio.sleep(30)
     while True:
         try:
@@ -62,7 +64,12 @@ app.include_router(siem.router,      prefix="/siem",     tags=["SIEM Security"])
 app.include_router(chatbot.router,   prefix="/chatbot",  tags=["Chatbot"])
 app.include_router(realtime_router)
 app.include_router(tee_router)
+app.add_middleware(TEEGatewayMiddleware)
 
 @app.get("/", tags=["Root"])
 def root():
     return {"message": "ICU Digital Twin API is running "}
+
+
+
+
