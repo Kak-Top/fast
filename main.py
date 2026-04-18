@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import auth, patients, vitals, resources, ai, siem, chatbot
 from routers.realtime_router import router as realtime_router, _kafka_inference_listener
 from pipeline import start_pipeline, stop_pipeline  
-from tee_enclave import get_enclave                      
 from dependencies import fake_patients_db, fake_resources_db
 from routers.tee import router as tee_router
 from middleware.tee_gateway import TEEGatewayMiddleware
