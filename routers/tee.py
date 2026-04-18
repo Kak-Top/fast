@@ -459,51 +459,79 @@ async def security_report():
     """
     **Frontend endpoint:** `GET /tee/security_report`
 
-    Complete security report. Frontend should call this
-    periodically and display in the security dashboard.
-
-    Returns:
-    - attestation: is code intact?
-    - merkle_integrity: is audit trail intact?
-    - encryption_mode: what encryption is active?
-    - threat_model: honest assessment of what's protected
+    Complete security report. Each section is independent —
+    if one service fails, the rest still return data.
     """
-    from services.anomaly import get_detector
-    from services.he_crypto import get_he_context
-    from services.merkle_audit import get_merkle_tree
-    from services.attestation import get_attestation
+    from datetime import datetime, timezone
 
-    detector = get_detector()
-    he = get_he_context()
-    tree = get_merkle_tree()
-    attestation = get_attestation()
-
-    # Check attestation
-    quote = attestation.get_quote()
-
-    # Check Merkle integrity
-    integrity = tree.verify_integrity()
-
-    return {
-        "overall_status": "SECURE" if (
-            quote["code_intact"] and integrity["intact"]
-        ) else "COMPROMISED",
-        "attestation": {
-            "code_intact": quote["code_intact"],
-            "code_measurement": quote["code_measurement"],
-            "tee_type": quote["tee_type"],
-            "uptime_seconds": quote["uptime_seconds"],
-        },
-        "audit_trail": {
-            "intact": integrity["intact"],
-            "entry_count": tree.entry_count,
-            "root_hash": tree.root_hash,
-        },
-        "encryption": he.info,
-        "anomaly_detection": {
+    # ── Anomaly Detection ──────────────────────────────
+    anomaly_info = {"error": "unavailable"}
+    try:
+        from services.anomaly import get_detector
+        detector = get_detector()
+        anomaly_info = {
             "model_source": detector.model_source,
             "detection_count": detector.detection_count,
-        },
+        }
+    except Exception as e:
+        anomaly_info = {"error": str(e)}
+
+    # ── Homomorphic Encryption ─────────────────────────
+    he_info = {"error": "unavailable"}
+    try:
+        from services.he_crypto import get_he_context
+        he = get_he_context()
+        he_info = he.info
+    except Exception as e:
+        he_info = {"error": str(e)}
+
+    # ── Merkle Audit Trail ─────────────────────────────
+    audit_info = {"error": "unavailable"}
+    audit_intact = None
+    try:
+        from services.merkle_audit import get_merkle_tree
+        tree = get_merkle_tree()
+        integrity = tree.verify_integrity()
+        audit_intact = integrity.get("intact", None)
+        audit_info = {
+            "intact": audit_intact,
+            "entry_count": tree.entry_count,
+            "root_hash": tree.root_hash,
+        }
+    except Exception as e:
+        audit_info = {"error": str(e)}
+
+    # ── Attestation ────────────────────────────────────
+    attestation_info = {"error": "unavailable"}
+    code_intact = None
+    try:
+        from services.attestation import get_attestation
+        attestation = get_attestation()
+        quote = attestation.get_quote()
+        code_intact = quote.get("code_intact", None)
+        attestation_info = {
+            "code_intact": code_intact,
+            "code_measurement": quote.get("code_measurement"),
+            "tee_type": quote.get("tee_type"),
+            "uptime_seconds": quote.get("uptime_seconds"),
+        }
+    except Exception as e:
+        attestation_info = {"error": str(e)}
+
+    # ── Overall Status ─────────────────────────────────
+    if code_intact is True and audit_intact is True:
+        overall = "SECURE"
+    elif code_intact is False or audit_intact is False:
+        overall = "COMPROMISED"
+    else:
+        overall = "PARTIAL"
+
+    return {
+        "overall_status": overall,
+        "attestation": attestation_info,
+        "audit_trail": audit_info,
+        "encryption": he_info,
+        "anomaly_detection": anomaly_info,
         "threat_model": {
             "protects_against": [
                 "Network eavesdropping (TLS + encryption)",
