@@ -29,7 +29,7 @@ How it all fits together
 3. Frontend calls GET /status  → sees model card with badges
 4. Clinician calls POST /predict  → gets risk score from trained model
                                      with CKKS seal + Merkle audit entry
-5. All steps logged to Merkle audit trail (visible via GET /tee/audit/recent)
+5. All steps logged to the SAME Merkle audit trail as /tee/* (visible via GET /tee/audit/recent)
 """
 
 from __future__ import annotations
@@ -50,7 +50,10 @@ from database import get_db
 from models import Patient, Vital
 from dependencies import get_current_user, require_role
 from engine.model_registry import registry, TrainedModelMeta
-from engine.tee_seal import seal, audit_trail, sealed_response
+from engine.tee_seal import seal, sealed_response
+
+# ── FIXED: Use the unified Merkle audit trail ────────────────────────────────
+from services.merkle_audit import get_merkle_tree
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -236,7 +239,7 @@ async def train_custom_model(
       3. Train chosen sklearn estimator
       4. Evaluate on hold-out split
       5. Register in ModelRegistry with full metadata
-      6. Log to Merkle audit trail
+      6. Log to unified Merkle audit trail
       7. Return model card + TurboQuant stats
 
     After training, use POST /icu/ai/models/custom/predict to run the model.
@@ -379,8 +382,8 @@ async def train_custom_model(
     )
     registry.register(meta)
 
-    # ── 5. Log to Merkle audit trail ───────────────────────────────────────────
-    audit_entry = audit_trail.append(
+    # ── 5. Log to unified Merkle audit trail ───────────────────────────────────
+    audit_entry = get_merkle_tree().add_entry(
         event_type="CUSTOM_MODEL_TRAINED",
         actor=current_user.username,
         data={
@@ -419,7 +422,7 @@ async def train_custom_model(
         "audit": {
             "logged_to_merkle": True,
             "leaf_hash": audit_entry["leaf_hash"],
-            "merkle_root": audit_entry["root"],
+            "merkle_root": audit_entry["root_hash"],
         },
         "next_step": "POST /icu/ai/models/custom/predict with {patient_id}",
     }
@@ -444,8 +447,8 @@ async def custom_model_status(current_user=Depends(get_current_user)):
         **status,
         "turboquant_server_available": TURBOQUANT_AVAILABLE,
         "sklearn_server_available": SKLEARN_AVAILABLE,
-        "audit_entries": len(audit_trail),
-        "merkle_root": audit_trail.root(),
+        "audit_entries": get_merkle_tree().entry_count,
+        "merkle_root": get_merkle_tree().root_hash,
         "capabilities": {
             "can_train": SKLEARN_AVAILABLE,
             "can_predict": registry.has_active(),
@@ -480,7 +483,7 @@ async def custom_model_predict(
       3. Run trained estimator
       4. If CKKS available: also run CKKS inference for comparison
       5. Seal result with HMAC proof
-      6. Log to Merkle audit trail
+      6. Log to unified Merkle audit trail
 
     Response includes:
       - Risk score from trained custom model
@@ -588,7 +591,7 @@ async def custom_model_predict(
     proof = seal(model_output)
 
     # ── Merkle audit log ───────────────────────────────────────────────────────
-    audit_entry = audit_trail.append(
+    audit_entry = get_merkle_tree().add_entry(
         event_type="CUSTOM_MODEL_PREDICTION",
         actor=current_user.username,
         data={
@@ -600,7 +603,7 @@ async def custom_model_predict(
         },
     )
 
-    return {
+        return {
         "prediction": model_output,
         "proof": proof,
         "sealed_at": datetime.utcnow().isoformat(),
@@ -619,7 +622,7 @@ async def custom_model_predict(
         "audit": {
             "logged_to_merkle": True,
             "leaf_hash": audit_entry["leaf_hash"],
-            "merkle_root": audit_entry["root"],
+            "merkle_root": audit_entry["root_hash"],
         },
 
         "verify_url": "POST /tee/verify  {model_output: ..., proof: '...'}",
@@ -640,7 +643,7 @@ async def delete_custom_model(
     # Deactivate
     registry._active = None
 
-    audit_trail.append(
+    get_merkle_tree().add_entry(
         event_type="CUSTOM_MODEL_DELETED",
         actor="admin",
         data={"model_name": name},
@@ -650,3 +653,5 @@ async def delete_custom_model(
         "message": f"✅ Model '{name}' cleared",
         "deleted_at": datetime.utcnow().isoformat(),
     }
+      
+                
