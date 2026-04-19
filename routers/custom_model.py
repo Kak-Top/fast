@@ -603,7 +603,7 @@ async def custom_model_predict(
         },
     )
 
-        return {
+    return {
         "prediction": model_output,
         "proof": proof,
         "sealed_at": datetime.utcnow().isoformat(),
