@@ -10,7 +10,7 @@ from pipeline import start_pipeline, stop_pipeline
 from dependencies import fake_patients_db, fake_resources_db
 from routers.tee import router as tee_router
 from middleware.tee_gateway import TEEGatewayMiddleware
-
+from routers.custom_model import router as custom_model_router
 
 async def keep_alive():
     await asyncio.sleep(30)
@@ -86,6 +86,7 @@ app.include_router(patients.router,  prefix="/icu",      tags=["ICU Patients"])
 app.include_router(vitals.router,    prefix="/icu",      tags=["Vitals"])
 app.include_router(resources.router, prefix="/icu",      tags=["ICU Resources"])
 app.include_router(ai.router,        prefix="/icu/ai",   tags=["AI Models"])
+app.include_router(custom_model_router, prefix="/icu/ai/models/custom", tags=["Custom AI Models"])
 app.include_router(chatbot.router,   prefix="/chatbot",  tags=["Chatbot"])
 app.include_router(realtime_router)
 
