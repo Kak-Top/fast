@@ -2,7 +2,7 @@
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, LargeBinary, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
-from datetime import datetime
+import datetime
 
 class User(Base):
     __tablename__ = "users"
@@ -89,8 +89,8 @@ class TrainedModel(Base):
     estimator_pickle = Column(LargeBinary, nullable=True)
     
        # NEW CODE (WORKS IN PYTHON 3.11)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     status = Column(String)  # occupied, available, in_use
     patient_id = Column(String, ForeignKey("patients.patient_id"), nullable=True)
 
