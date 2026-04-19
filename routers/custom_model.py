@@ -211,13 +211,14 @@ def _encode_with_turboquant(X: np.ndarray) -> np.ndarray:
 
 
 def _vitals_to_array(v: "Vital") -> list:
+    """Convert a Vital DB row to a feature array. Uses getattr for safety."""
     return [
-        v.heart_rate or 80,
-        v.spo2 or 100,
-        v.temperature or 37,
-        v.respiratory_rate or 16,
-        v.blood_pressure_sys or 120,
-        v.blood_pressure_dia or 80,
+        getattr(v, 'heart_rate', None) or 80,
+        getattr(v, 'spo2', None) or 100,
+        getattr(v, 'temperature', None) or 37,
+        getattr(v, 'respiratory_rate', None) or 16,
+        getattr(v, 'blood_pressure_sys', None) or 120,
+        getattr(v, 'blood_pressure_dia', None) or 80,
         3.0,    # weight_kg placeholder
         38.0,   # gestational_age_weeks placeholder
     ]
@@ -277,7 +278,7 @@ async def train_custom_model(
             y_rows.append(int(row.get("label", 0)))
         logger.info(f"Custom data: {len(X_rows)} samples")
 
-    # Live data from DB
+    # ── Live data from DB (SAFE VERSION with getattr) ─────────────────────────
     live_added = 0
     if body.use_live_data:
         try:
@@ -288,20 +289,26 @@ async def train_custom_model(
                     select(Vital)
                     .where(Vital.patient_id == p.patient_id)
                     .order_by(Vital.timestamp.desc())
-                    .limit(50)   # last 50 readings per patient
+                    .limit(50)
                 )
                 vitals = vres.scalars().all()
                 for v in vitals:
-                    if v.heart_rate is None:
+                    if getattr(v, 'heart_rate', None) is None:
                         continue
                     arr = _vitals_to_array(v)
-                    # Label: critical = high risk
-                    label = 1 if (v.is_critical or (v.spo2 and v.spo2 < 90)) else 0
+
+                    # ── SAFE LABELING ──────────────────────────────
+                    # Use getattr in case 'is_critical' doesn't exist in DB
+                    is_critical = getattr(v, 'is_critical', False)
+                    spo2_val = getattr(v, 'spo2', None)
+                    low_spo2 = spo2_val is not None and spo2_val < 90
+                    label = 1 if (is_critical or low_spo2) else 0
+
                     X_rows.append(arr)
                     y_rows.append(label)
                     live_added += 1
         except Exception as e:
-            logger.warning(f"Could not fetch live DB vitals: {e}")
+            logger.warning(f"Could not fetch/process live DB vitals: {e}")
 
     # Synthetic data
     X_syn, y_syn = _generate_synthetic(body.synthetic_samples)
@@ -382,19 +389,30 @@ async def train_custom_model(
     )
     registry.register(meta)
 
-    # ── 5. Log to unified Merkle audit trail ───────────────────────────────────
-    audit_entry = get_merkle_tree().add_entry(
-        event_type="CUSTOM_MODEL_TRAINED",
-        actor=current_user.username,
-        data={
-            "model_id": meta.model_id,
-            "model_name": body.model_name,
-            "accuracy": acc,
-            "n_samples": n_samples,
-            "turboquant": tq_used,
-            "ckks": TURBOQUANT_AVAILABLE,
-        },
-    )
+
+    # ── 4b. Persist to database ────────────────────────────────────────────────
+    try:
+        await registry.persist_to_db(meta, db)
+    except Exception as e:
+        logger.error(f"Failed to persist model to DB: {e}")
+         
+    # ── 5. Log to unified Merkle audit trail (SAFE with try/except) ───────────
+    audit_entry = {"leaf_hash": "unavailable", "root_hash": "unavailable"}
+    try:
+        audit_entry = get_merkle_tree().add_entry(
+            event_type="CUSTOM_MODEL_TRAINED",
+            actor=current_user.username,
+            data={
+                "model_id": meta.model_id,
+                "model_name": body.model_name,
+                "accuracy": acc,
+                "n_samples": n_samples,
+                "turboquant": tq_used,
+                "ckks": TURBOQUANT_AVAILABLE,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Merkle audit logging failed: {e}")
 
     # ── 6. Return model card ───────────────────────────────────────────────────
     return {
@@ -420,7 +438,7 @@ async def train_custom_model(
             ),
         },
         "audit": {
-            "logged_to_merkle": True,
+            "logged_to_merkle": audit_entry.get("leaf_hash") != "unavailable",
             "leaf_hash": audit_entry["leaf_hash"],
             "merkle_root": audit_entry["root_hash"],
         },
@@ -443,12 +461,20 @@ async def custom_model_status(current_user=Depends(get_current_user)):
     """
     status = registry.status()
 
+    # Safely get Merkle stats
+    try:
+        audit_entries = get_merkle_tree().entry_count
+        merkle_root = get_merkle_tree().root_hash
+    except Exception:
+        audit_entries = 0
+        merkle_root = "unavailable"
+
     return {
         **status,
         "turboquant_server_available": TURBOQUANT_AVAILABLE,
         "sklearn_server_available": SKLEARN_AVAILABLE,
-        "audit_entries": get_merkle_tree().entry_count,
-        "merkle_root": get_merkle_tree().root_hash,
+        "audit_entries": audit_entries,
+        "merkle_root": merkle_root,
         "capabilities": {
             "can_train": SKLEARN_AVAILABLE,
             "can_predict": registry.has_active(),
@@ -561,22 +587,22 @@ async def custom_model_predict(
 
     latency = round((time.perf_counter() - t0) * 1000, 2)
 
-    # Build vitals snapshot for response
+    # Build vitals snapshot for response (safe with getattr)
     vitals_snapshot = {
-        "heart_rate": latest.heart_rate,
-        "spo2": latest.spo2,
-        "temperature": latest.temperature,
-        "respiratory_rate": latest.respiratory_rate,
-        "blood_pressure_sys": latest.blood_pressure_sys,
-        "blood_pressure_dia": latest.blood_pressure_dia,
-        "timestamp": latest.timestamp.isoformat() if latest.timestamp else None,
+        "heart_rate": getattr(latest, 'heart_rate', None),
+        "spo2": getattr(latest, 'spo2', None),
+        "temperature": getattr(latest, 'temperature', None),
+        "respiratory_rate": getattr(latest, 'respiratory_rate', None),
+        "blood_pressure_sys": getattr(latest, 'blood_pressure_sys', None),
+        "blood_pressure_dia": getattr(latest, 'blood_pressure_dia', None),
+        "timestamp": latest.timestamp.isoformat() if hasattr(latest, 'timestamp') and latest.timestamp else None,
     }
 
-    # ── Seal result ────────────────────────────────────────────────────────────
+    # ── Seal result (SAFE with try/except) ────────────────────────────────────
     model_output = {
         "patient_id": body.patient_id,
-        "patient_name": patient.name,
-        "diagnosis": patient.diagnosis,
+        "patient_name": getattr(patient, 'name', 'Unknown'),
+        "diagnosis": getattr(patient, 'diagnosis', None),
         "risk_score": risk_score_pct,
         "risk_category": category,
         "sepsis_probability": f"{min(risk_score_pct + 8, 100)}%",
@@ -588,20 +614,28 @@ async def custom_model_predict(
         "inference_latency_ms": latency,
     }
 
-    proof = seal(model_output)
+    proof = "seal_unavailable"
+    try:
+        proof = seal(model_output)
+    except Exception as e:
+        logger.error(f"HMAC sealing failed: {e}")
 
-    # ── Merkle audit log ───────────────────────────────────────────────────────
-    audit_entry = get_merkle_tree().add_entry(
-        event_type="CUSTOM_MODEL_PREDICTION",
-        actor=current_user.username,
-        data={
-            "patient_id": body.patient_id,
-            "model_id": meta.model_id,
-            "model_name": meta.model_name,
-            "risk_score": risk_score_pct,
-            "turboquant": tq_stats is not None,
-        },
-    )
+    # ── Merkle audit log (SAFE with try/except) ───────────────────────────────
+    audit_entry = {"leaf_hash": "unavailable", "root_hash": "unavailable"}
+    try:
+        audit_entry = get_merkle_tree().add_entry(
+            event_type="CUSTOM_MODEL_PREDICTION",
+            actor=current_user.username,
+            data={
+                "patient_id": body.patient_id,
+                "model_id": meta.model_id,
+                "model_name": meta.model_name,
+                "risk_score": risk_score_pct,
+                "turboquant": tq_stats is not None,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Merkle audit logging failed: {e}")
 
     return {
         "prediction": model_output,
@@ -620,7 +654,7 @@ async def custom_model_predict(
         "ckks_comparison": ckks_comparison,
 
         "audit": {
-            "logged_to_merkle": True,
+            "logged_to_merkle": audit_entry.get("leaf_hash") != "unavailable",
             "leaf_hash": audit_entry["leaf_hash"],
             "merkle_root": audit_entry["root_hash"],
         },
@@ -630,9 +664,11 @@ async def custom_model_predict(
 
 
 # ── DELETE /icu/ai/models/custom ──────────────────────────────────────────────
+
 @router.delete("", summary="Clear active custom model (admin only)")
 async def delete_custom_model(
     _admin=Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),  # ADD db dependency
 ):
     if not registry.has_active():
         return {"message": "No active model to clear"}
@@ -640,18 +676,20 @@ async def delete_custom_model(
     meta = registry.get_active()
     name = meta.model_name if meta else "unknown"
 
-    # Deactivate
-    registry._active = None
+    # Deactivate from DB + memory
+    await registry.delete_from_db(db)
 
-    get_merkle_tree().add_entry(
-        event_type="CUSTOM_MODEL_DELETED",
-        actor="admin",
-        data={"model_name": name},
-    )
+    # Safe Merkle logging
+    try:
+        get_merkle_tree().add_entry(
+            event_type="CUSTOM_MODEL_DELETED",
+            actor="admin",
+            data={"model_name": name},
+        )
+    except Exception as e:
+        logger.error(f"Merkle audit logging failed for model deletion: {e}")
 
     return {
         "message": f"✅ Model '{name}' cleared",
         "deleted_at": datetime.utcnow().isoformat(),
     }
-      
-                
