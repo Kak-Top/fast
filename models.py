@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey
+# models.py - TOP OF FILE
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, LargeBinary, JSON
 from sqlalchemy.orm import relationship
 from database import Base
 import datetime
