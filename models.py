@@ -50,6 +50,46 @@ class Resource(Base):
 
     resource_id = Column(String, primary_key=True, index=True)
     type = Column(String)  # bed, ventilator, monitor
+# models.py — ADD THIS NEW TABLE
+
+class TrainedModel(Base):
+    """Stores trained custom model metadata + pickle blob."""
+    __tablename__ = "trained_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(String(100), unique=True, index=True, nullable=False)
+    model_name = Column(String(50), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    
+    # Performance metrics
+    accuracy = Column(Float, nullable=False, default=0.0)
+    f1_score = Column(Float, default=0.0)
+    auc_roc = Column(Float, default=0.0)
+    n_samples = Column(Integer, default=0)
+    n_features = Column(Integer, default=8)
+    
+    # Feature names as JSON array
+    feature_names = Column(JSON, default=list)
+    
+    # Security/TurboQuant metadata
+    turboquant_enabled = Column(Boolean, default=False)
+    ckks_enabled = Column(Boolean, default=False)
+    compression_ratio = Column(String(20), default="1.0x")
+    vram_saved_percent = Column(Float, default=0.0)
+    encoding_latency_ms = Column(Float, default=0.0)
+    
+    # Who trained it and when
+    description = Column(Text, default="")
+    trained_at = Column(Float, default=0.0)  # Unix timestamp
+    trained_by = Column(String(100), default="")
+    is_active = Column(Boolean, default=False)  # Only ONE should be active
+    
+    # The actual model — stored as pickle bytes
+    estimator_pickle = Column(LargeBinary, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     status = Column(String)  # occupied, available, in_use
     patient_id = Column(String, ForeignKey("patients.patient_id"), nullable=True)
 
