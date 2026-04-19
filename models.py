@@ -2,7 +2,7 @@
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, LargeBinary, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
-import datetime
+from datetime import datetime
 
 class User(Base):
     __tablename__ = "users"
@@ -88,7 +88,7 @@ class TrainedModel(Base):
     # The actual model — stored as pickle bytes
     estimator_pickle = Column(LargeBinary, nullable=True)
     
-    # Timestamps
+       # NEW CODE (WORKS IN PYTHON 3.11)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     status = Column(String)  # occupied, available, in_use
