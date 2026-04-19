@@ -17,7 +17,7 @@ class SecureInferenceHead:
     def __init__(self, encoder: PolarQuantEncoder = None):
         # Initialize CKKS context
         self.context = ts.context(
-            ts.SchemeType.CKKS,
+            ts.SCHEME_TYPE.CKKS,
             poly_modulus_degree=settings.CKKS_POLY_DEGREE,
             coeff_mod_bit_sizes=[60, 40, 40, 60]
         )
