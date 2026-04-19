@@ -4,13 +4,23 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Routers
 from routers import auth, patients, vitals, resources, ai, chatbot
 from routers.realtime_router import router as realtime_router, _kafka_inference_listener
+from routers.tee import router as tee_router
+from routers.custom_model import router as custom_model_router
+
+# Database & Engine
+from database import async_session_maker
+from engine.model_registry import registry
+
+# Pipeline & Dependencies
 from pipeline import start_pipeline, stop_pipeline  
 from dependencies import fake_patients_db, fake_resources_db
-from routers.tee import router as tee_router
+
+# Middleware
 from middleware.tee_gateway import TEEGatewayMiddleware
-from routers.custom_model import router as custom_model_router
 
 async def keep_alive():
     await asyncio.sleep(30)
@@ -27,11 +37,25 @@ async def keep_alive():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 1. Background Tasks
     asyncio.create_task(keep_alive())
     asyncio.create_task(_kafka_inference_listener())
     await start_pipeline() 
 
-    # ── TEE: Seal initial state at boot ──────────────
+    # 2. Database: Load Trained Model on Startup
+    # ────────────────────────────────────────────────
+    try:
+        async with async_session_maker() as db:
+            loaded = await registry.load_from_db(db)
+            if loaded:
+                print(" Trained model loaded from database successfully.")
+            else:
+                print("  No active trained model found in database.")
+    except Exception as e:
+        print(f"  Error loading model from database: {e}")
+
+    # 3. TEE: Seal initial state at boot
+    # ────────────────────────────────────────────────
     try:
         from services.merkle_audit import get_merkle_tree
         from utils.proof import seal_data
@@ -62,6 +86,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # ── SHUTDOWN ─────────────────────────────────────
     await stop_pipeline()   
 
 
@@ -99,4 +124,4 @@ app.add_middleware(TEEGatewayMiddleware)
 
 @app.get("/", tags=["Root"])
 def root():
-    return {"message": "ICU Digital Twin API is running 🔐 TEE Protected"}
+    return {"message": "ICU Digital Twin API is running  TEE Protected"}
