@@ -51,7 +51,14 @@ class Resource(Base):
 
     resource_id = Column(String, primary_key=True, index=True)
     type = Column(String)  # bed, ventilator, monitor
-# models.py — ADD THIS NEW TABLE
+    
+    # ── ADD THESE MISSING COLUMNS HERE ────────────────────────
+    status = Column(String)  # occupied, available, in_use
+    patient_id = Column(String, ForeignKey("patients.patient_id"), nullable=True)
+    
+    # ── FIX THE INDENTATION OF THE RELATIONSHIP ─────────────────
+    patient = relationship("Patient", back_populates="resources")
+
 
 class TrainedModel(Base):
     """Stores trained custom model metadata + pickle blob."""
@@ -88,10 +95,6 @@ class TrainedModel(Base):
     # The actual model — stored as pickle bytes
     estimator_pickle = Column(LargeBinary, nullable=True)
     
-       # NEW CODE (WORKS IN PYTHON 3.11)
+    # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-    status = Column(String)  # occupied, available, in_use
-    patient_id = Column(String, ForeignKey("patients.patient_id"), nullable=True)
-
-    patient = relationship("Patient", back_populates="resources")
