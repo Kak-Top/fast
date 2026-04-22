@@ -50,23 +50,43 @@ def verify_seal(sealed: Dict[str, Any]) -> bool:
 
 
 def tee_response(data: Any, request: Request = None) -> Dict[str, Any]:
-    """Wrap ANY response data in a TEE-protected envelope."""
+    """
+    Wrap ANY response data in a TEE-protected envelope.
+    Merges data fields at top level so frontend still works
+    (response.patients still accessible), plus adds TEE fields.
+    """
     from services.merkle_audit import get_merkle_tree
+
+    # Seal the data with HMAC proof
     sealed = seal_data(data)
+
+    # Build response: merge original data fields at top level
+    result = {}
+    if isinstance(data, dict):
+        result.update(data)
+
+    # Add TEE fields
+    result["proof"] = sealed["proof"]
+    result["sealed_at"] = sealed["sealed_at"]
+
+    # Get current Merkle root
     try:
         merkle = get_merkle_tree()
-        sealed["merkle_root"] = merkle.root_hash
-        sealed["audit_entry_count"] = merkle.entry_count
+        result["merkle_root"] = merkle.root_hash
+        result["audit_entry_count"] = merkle.entry_count
     except Exception:
-        sealed["merkle_root"] = "unavailable"
-        sealed["audit_entry_count"] = 0
+        result["merkle_root"] = "unavailable"
+        result["audit_entry_count"] = 0
+
+    # Get threat score from gateway middleware
     if request and hasattr(request.state, "threat_score"):
-        sealed["threat_score"] = request.state.threat_score
-        sealed["threat_type"] = request.state.threat_assessment["model_output"]["threat_type"]
+        result["threat_score"] = request.state.threat_score
+        result["threat_type"] = request.state.threat_assessment["model_output"]["threat_type"]
     else:
-        sealed["threat_score"] = None
-        sealed["threat_type"] = None
-    return sealed
+        result["threat_score"] = None
+        result["threat_type"] = None
+
+    return result
 
 
 def generate_nonce() -> str:
