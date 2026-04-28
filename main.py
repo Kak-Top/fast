@@ -41,7 +41,7 @@ async def keep_alive():
 
                 
                 if ORACLE_URL:
-                    await client.get(f"{ORACLE_URL}/health", timeout=15)
+                    await client.get(f"{ORACLE_URL}/", timeout=15)
                     print("Oracle keep-alive ping ✓")
 
         except Exception as e:
