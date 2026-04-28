@@ -31,7 +31,10 @@ router = APIRouter(prefix="/icu/ai/oracle", tags=["Oracle"])
 
 # ── Set this env var on Render ──────────────────────────────────────────────────
 import os
-ORACLE_URL = os.getenv("ORACLE_SERVICE_URL", "https://your-hf-space.hf.space")
+ORACLE_URL = os.getenv("ORACLE_SERVICE_URL", "").rstrip("/")
+if not ORACLE_URL:
+    log.warning("ORACLE_SERVICE_URL is not set! Proxy will fail.")
+    ORACLE_URL = "https://your-hf-space.hf.space" # Fallback
 
 
 # ─── Schemas ───────────────────────────────────────────────────────────────────
@@ -83,6 +86,10 @@ async def poll_oracle_task(
             return resp.json()
         except httpx.ConnectError:
             raise HTTPException(503, "Oracle service unreachable")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise HTTPException(404, f"Task {task_id} not found on Oracle service")
+            raise HTTPException(502, f"Oracle service error: {e.response.text}")
 
 
 @router.websocket("/ws/{task_id}")
