@@ -11,6 +11,8 @@ from routers.realtime_router import router as realtime_router, _kafka_inference_
 from routers.tee import router as tee_router
 from routers.custom_model import router as custom_model_router
 
+from routers.oracle import router as oracle_router
+
 # Database & Engine
 from database import async_session_maker
 from engine.model_registry import registry
@@ -22,17 +24,30 @@ from dependencies import fake_patients_db, fake_resources_db
 # Middleware
 from middleware.tee_gateway import TEEGatewayMiddleware
 
+
+ORACLE_URL = os.getenv("ORACLE_SERVICE_URL", "")
+
 async def keep_alive():
-    await asyncio.sleep(30)
+    await asyncio.sleep(30)  #
+
     while True:
         try:
             url = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000")
+
             async with httpx.AsyncClient() as client:
+                # keep Render ping as-is
                 await client.get(f"{url}/")
-                print("Keep-alive ping sent ✓")
+                print("Render keep-alive ping ✓")
+
+                
+                if ORACLE_URL:
+                    await client.get(f"{ORACLE_URL}/health", timeout=15)
+                    print("Oracle keep-alive ping ✓")
+
         except Exception as e:
             print(f"Keep-alive failed: {e}")
-        await asyncio.sleep(5 * 60)
+
+        await asyncio.sleep(5 * 60) 
 
 
 @asynccontextmanager
@@ -112,6 +127,7 @@ app.include_router(vitals.router,    prefix="/icu",      tags=["Vitals"])
 app.include_router(resources.router, prefix="/icu",      tags=["ICU Resources"])
 app.include_router(ai.router,        prefix="/icu/ai",   tags=["AI Models"])
 app.include_router(custom_model_router, prefix="/icu/ai/models/custom", tags=["Custom AI Models"])
+app.include_router(oracle_router)
 app.include_router(chatbot.router,   prefix="/chatbot",  tags=["Chatbot"])
 app.include_router(realtime_router)
 
