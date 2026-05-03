@@ -406,6 +406,57 @@ async def _labs_consumer_loop():
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def _inference_ws_broadcaster():
+    """Consume inference.output → broadcast to WebSocket subscribers."""
+    from routers.realtime_router import manager  # import here to avoid circular
+    kafka_cfg = get_kafka_config()
+    await asyncio.sleep(8)
+
+    while True:
+        consumer = None
+        try:
+            consumer = AIOKafkaConsumer(
+                "inference.output",
+                **kafka_cfg,
+                group_id="ws-broadcast-group",
+                auto_offset_reset="latest",
+                enable_auto_commit=True,
+                value_deserializer=lambda v: json.loads(v.decode()),
+            )
+            await consumer.start()
+            log.info("[WSBroadcaster] Connected to inference.output")
+
+            async for msg in consumer:
+                data = msg.value
+                patient_id = data["patient_id"]
+                risk_obj = data.get("risk", {})
+                ra = risk_obj.get("risk_assessment", {})
+
+                payload = {
+                    "type": "inference_update",
+                    "patient_id": patient_id,
+                    "riskPercentage": ra.get("overall_score", 0),
+                    "label": ra.get("category", "LOW RISK"),
+                    "mort_7d": risk_obj.get("mort_7d"),        # NEW field
+                    "mort_30d": risk_obj.get("mort_30d"),      # NEW field
+                    "sofa_score": risk_obj.get("sofa_score"),  # NEW field
+                    "factors": data.get("contributing_factors", []),
+                    "vitals": data.get("vitals", {}),
+                    "simulator_state": data.get("simulator_state", "stable"),
+                    "timestamp": data.get("timestamp"),
+                }
+                await manager.broadcast(patient_id, payload)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error("[WSBroadcaster] %s — retrying in 5s", e)
+            await asyncio.sleep(5)
+        finally:
+            if consumer:
+                try: await consumer.stop()
+                except: pass
+
 async def start_pipeline():
     """Start all pipeline tasks. Call from FastAPI lifespan."""
     log.info("═" * 50)
@@ -420,6 +471,7 @@ async def start_pipeline():
     _tasks.append(asyncio.create_task(_patient_discovery_loop()))
     _tasks.append(asyncio.create_task(_vitals_consumer_loop()))
     _tasks.append(asyncio.create_task(_labs_consumer_loop()))
+    _tasks.append(asyncio.create_task(_inference_ws_broadcaster()))
 
 
 async def stop_pipeline():
