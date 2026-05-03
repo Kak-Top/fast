@@ -51,6 +51,9 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # ── Skip if TEE is disabled ──────────────────────────────
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+        
         if not TEE_ENABLED:
             return await call_next(request)
 
