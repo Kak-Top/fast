@@ -383,10 +383,11 @@ async def _labs_consumer_loop():
                             len(result.get("abnormal_flags", [])),
                         )
                     except httpx.HTTPStatusError as e:
-                        log.error("API error for %s: %s %s",
-                                  patient_id, e.response.status_code, e.response.text[:200])
+                        log.error("Labs API error for %s: %s — %s",
+                            patient_id, e.response.status_code, e.response.text[:300])
                     except Exception as e:
-                        log.error("Error posting labs for %s: %s — type: %s", patient_id, e, type(e).__name__)
+                         log.error("Error posting labs for %s: %s — type=%s",
+                            patient_id, e, type(e).__name__, exc_info=True)
 
         except asyncio.CancelledError:
             log.info("[LabsConsumer] Shutting down")
