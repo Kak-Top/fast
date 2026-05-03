@@ -164,17 +164,28 @@ async def _kafka_inference_listener():
                     turboquant_meta = {"turboquant_enabled": False}
 
                 # Shape the payload for the UI
+                risk_obj = data.get("risk", {})
+                ra = risk_obj.get("risk_assessment", {})
+
                 ui_payload = {
-                    "type": "update",
+                    "type": "inference_update",
                     "patient_id": patient_id,
-                    "vitals": data.get("vitals", {}),
-                    "risk": data.get("risk", {}),
-                    "flags": data.get("vitals_response", {}).get("abnormal_flags", []),
-                    "is_critical": data.get("vitals_response", {}).get("is_critical", False),
+                    # ── Flat fields the frontend reads directly ──────────────────────
+                    "riskPercentage": ra.get("overall_score", 0),
+                    "label":          ra.get("category", "LOW RISK"),
+                    "mort_7d":        risk_obj.get("mort_7d"),
+                    "mort_30d":       risk_obj.get("mort_30d"),
+                    "sofa_score":     risk_obj.get("sofa_score"),
+                    "shock_index":    risk_obj.get("shock_index"),
+                    # ── Full objects for anything that needs them ────────────────────
+                    "risk":           risk_obj,
+                    "vitals":         data.get("vitals", {}),
+                    "factors":        risk_obj.get("contributing_factors", []),
+                    "flags":          data.get("vitals_response", {}).get("abnormal_flags", []),
+                    "is_critical":    data.get("vitals_response", {}).get("is_critical", False),
                     "simulator_state": data.get("simulator_state"),
-                    "timestamp": data.get("timestamp"),
-                    #  ADD TurboQuant metadata for "WOW" UI badges
-                    "turboquant": turboquant_meta,
+                    "timestamp":      data.get("timestamp"),
+                    "turboquant":     turboquant_meta,
                 }
 
                 # Also include latest labs if we have them
