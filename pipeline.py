@@ -26,7 +26,7 @@ from typing import Dict
 
 import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-
+from routers.realtime_router import _kafka_inference_listener
 from patient_state_machine import PatientSimulator, PatientState
 from kafka_config import get_kafka_config, is_cloud_kafka
 
@@ -173,7 +173,7 @@ async def _single_patient_sim_loop(patient_id: str):
             log.info("[Simulator] Stopped loop for %s", patient_id)
             break
         except Exception as e:
-            log.error("[Simulator] Error for %s: %s", patient_id, e)
+            log.error("Error posting labs for %s: %s", patient_id, e)
 
         await asyncio.sleep(TICK_INTERVAL)
 
@@ -386,7 +386,7 @@ async def _labs_consumer_loop():
                         log.error("API error for %s: %s %s",
                                   patient_id, e.response.status_code, e.response.text[:200])
                     except Exception as e:
-                        log.error("Error posting labs for %s: %s", patient_id, e)
+                        log.error("Error posting labs for %s: %s — type: %s", patient_id, e, type(e).__name__)
 
         except asyncio.CancelledError:
             log.info("[LabsConsumer] Shutting down")
@@ -458,7 +458,6 @@ async def _inference_ws_broadcaster():
                 except: pass
 
 async def start_pipeline():
-    """Start all pipeline tasks. Call from FastAPI lifespan."""
     log.info("═" * 50)
     log.info("Starting embedded Kafka pipeline...")
     log.info("  Kafka: %s", os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"))
@@ -471,7 +470,10 @@ async def start_pipeline():
     _tasks.append(asyncio.create_task(_patient_discovery_loop()))
     _tasks.append(asyncio.create_task(_vitals_consumer_loop()))
     _tasks.append(asyncio.create_task(_labs_consumer_loop()))
-    _tasks.append(asyncio.create_task(_inference_ws_broadcaster()))
+
+    # ← ADD THIS — WebSocket broadcaster, started after a delay so Kafka is ready
+    
+    _tasks.append(asyncio.create_task(_kafka_inference_listener()))
 
 
 async def stop_pipeline():
