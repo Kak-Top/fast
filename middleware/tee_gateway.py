@@ -12,14 +12,13 @@ import os
 import json
 import time
 import logging
+import asyncio
 from datetime import datetime, timezone
 from urllib import request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from typing import Callable
-
-from websockets import asyncio
 
 logger = logging.getLogger("tee.gateway")
 
