@@ -54,7 +54,7 @@ async def keep_alive():
 async def lifespan(app: FastAPI):
     # 1. Background Tasks
     asyncio.create_task(keep_alive())
-    asyncio.create_task(_kafka_inference_listener())
+   # asyncio.create_task(_kafka_inference_listener())
     await start_pipeline() 
 
     # 2. Database: Load Trained Model on Startup
