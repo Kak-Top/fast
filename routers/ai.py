@@ -285,11 +285,14 @@ async def get_risk_score(
             encoded = encoder.encode(vital_array, patient_id=patient_id)
             cache.store(patient_id, encoded)
             
-            # Run secure inference on compressed tokens (<10ms target)
+            # ── USE NEOcare scorer instead of TurboQuant's fake 0.5 ──────
+            risk = _compute_risk_score(latest_dict, labs=labs_dict, age=patient.age or 60)
+            risk_score_normalized = risk["score"]  # real clinical score
+            
+            # Run secure inference on compressed tokens (for metadata only, not scoring)
             result = inference.compute_risk_score(encoded)
             
-            # Map TurboQuant result to your existing response format
-            risk_score_normalized = int(result["score"] * 100)  # 0.87 → 87
+            # Map NEOcare result to response format
             risk_category_map = {"LOW": "LOW RISK", "MEDIUM": "MODERATE RISK", "HIGH": "HIGH RISK"}
             
             # Build response using YOUR existing structure (backward compatible!)
@@ -327,13 +330,17 @@ async def get_risk_score(
                 "assessed_at": datetime.utcnow().isoformat(),
                 "risk_assessment": {
                     "overall_score": risk_score_normalized,
-                    "category": risk_category_map.get(result["risk_level"], risk_category_map["LOW"]),
+                    "category": risk["category"],  # Use NEOcare category, not TurboQuant's
                     "sepsis_probability": f"{sepsis_prob}%",
                     "deterioration_probability": f"{deterioration_prob}%",
-                    "inference_latency_ms": result["inference_metadata"]["latency_ms"],  # ✅ NEW
-                    "secure_mode": result["inference_metadata"]["secure_computation"],   # ✅ NEW
+                    "mort_7d":  risk["mort_7d"],    # From NEOcare
+                    "mort_30d": risk["mort_30d"],   # From NEOcare
+                    "sofa_score": risk["sofa_score"],  # From NEOcare
+                    "shock_index": risk["shock_index"],  # From NEOcare
+                    "inference_latency_ms": result["inference_metadata"]["latency_ms"],  # From TurboQuant metadata
+                    "secure_mode": result["inference_metadata"]["secure_computation"],   # From TurboQuant metadata
                 },
-                "contributing_factors": factors if factors else ["All vitals within acceptable range"],
+                "contributing_factors": risk["contributing_factors"] if risk["contributing_factors"] else ["All vitals within acceptable range"],
                 "recommended_actions": actions,
                 "model_info": {
                     "model": "TurboQuant-CKKS (3-bit secure inference)" if use_turboquant else "XGBoost (simulated — replace with trained model)",
