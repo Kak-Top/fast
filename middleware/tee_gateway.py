@@ -13,10 +13,13 @@ import json
 import time
 import logging
 from datetime import datetime, timezone
+from urllib import request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from typing import Callable
+
+from websockets import asyncio
 
 logger = logging.getLogger("tee.gateway")
 
@@ -57,6 +60,11 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
         if any(path.startswith(skip) for skip in TEE_SKIP_PATHS):
             return await call_next(request)
 
+        # ── Skip internal pipeline calls (from 127.0.0.1) ────────
+        source_ip = self._extract_ip(request)
+        if source_ip in ("127.0.0.1", "::1", "localhost"):
+            return await call_next(request)
+
         start_time = time.time()
 
         try:
@@ -74,10 +82,19 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
                 "request_data": {},
             }
 
-            # Run detection
-            threat_result = detector.detect(request_info)
-            threat_score = threat_result["model_output"]["threat_score"]
-            threat_type = threat_result["model_output"]["threat_type"]
+            # Run detection — with timeout so it never blocks the request
+            try:
+                threat_result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, detector.detect, request_info
+                    ),
+                    timeout=0.3  # 300ms max — if slower, fail open
+                )
+                threat_score = threat_result["model_output"]["threat_score"]
+                threat_type = threat_result["model_output"]["threat_type"]
+            except asyncio.TimeoutError:
+                logger.warning("TEE detection timed out for %s — failing open", path)
+                return await call_next(request)
 
             elapsed = time.time() - start_time
             logger.info(
