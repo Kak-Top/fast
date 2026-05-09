@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_, desc
 import uuid
-import pandas as pd
 import numpy as np
 import os
 import warnings
@@ -490,6 +489,8 @@ class ICUDashboardBackend:
         
     def load_or_generate_data(self):
         """Load existing data or generate synthetic data"""
+        import pandas as pd
+
         try:
             # Try to load existing data (local to separated dashboard)
             self.data = pd.read_csv('datasets/icu_managment_datasets/icu_resource_data.csv')
@@ -702,6 +703,8 @@ class ICUDashboardBackend:
     def train_day_based_model(self):
         """Train a model to predict expected resources based on day of week"""
         try:
+            import pandas as pd
+
             # Create realistic day-based patterns for ICU resource needs
             # Based on typical hospital patterns: weekdays vs weekends
             
@@ -818,6 +821,8 @@ class ICUDashboardBackend:
     
     def get_monthly_trends(self):
         """Get monthly resource trends and predictions"""
+        import pandas as pd
+
         if self.data is None:
             return None
         
