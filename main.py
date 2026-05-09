@@ -124,7 +124,7 @@ app.add_middleware(
 app.include_router(auth.router,      prefix="/auth",     tags=["Auth"])
 app.include_router(patients.router,  prefix="/icu",      tags=["ICU Patients"])
 app.include_router(vitals.router,    prefix="/icu",      tags=["Vitals"])
-app.include_router(resources.router, prefix="/icu",      tags=["ICU Resources"])
+app.include_router(resources.router)
 app.include_router(ai.router,        prefix="/icu/ai",   tags=["AI Models"])
 app.include_router(custom_model_router, prefix="/icu/ai/models/custom", tags=["Custom AI Models"])
 app.include_router(oracle_router)
