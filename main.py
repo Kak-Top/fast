@@ -112,7 +112,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.add_middleware(TEEGatewayMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -123,6 +123,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.add_middleware(TEEGatewayMiddleware)
 
 app.include_router(auth.router,      prefix="/auth",     tags=["Auth"])
 app.include_router(patients.router,  prefix="/icu",      tags=["ICU Patients"])
