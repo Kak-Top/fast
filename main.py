@@ -115,17 +115,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://app.capstone.dpdns.org",
-        "https://capstone.dpdns.org",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-app.add_middleware(TEEGatewayMiddleware)
 
 app.include_router(auth.router,      prefix="/auth",     tags=["Auth"])
 app.include_router(patients.router,  prefix="/icu",      tags=["ICU Patients"])
@@ -141,7 +135,7 @@ app.include_router(realtime_router)
 app.include_router(tee_router)
 
 # ── TEE Middleware (must be LAST add_middleware call) ─
-
+app.add_middleware(TEEGatewayMiddleware)
 
 
 @app.get("/", tags=["Root"])
