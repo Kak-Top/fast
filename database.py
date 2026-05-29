@@ -25,10 +25,7 @@ if SQLALCHEMY_DATABASE_URL:
 # Neon requires SSL, so we use connect_args to enforce it safely
 engine = create_async_engine(
     SQLALCHEMY_DATABASE_URL or "postgresql+asyncpg://user:password@localhost/dbname",
-    echo=False,  # Disabled — echo=True causes excessive ROLLBACK log noise in production
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
+    echo=True, # Set to False in production
     connect_args={"ssl": "require"} if "neon.tech" in (SQLALCHEMY_DATABASE_URL or "") else {}
 )
 
