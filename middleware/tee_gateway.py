@@ -56,9 +56,6 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
         
         if not TEE_ENABLED:
             return await call_next(request)
-         # ── Allow CORS preflight requests ────────────────────────
-        if request.method == "OPTIONS":
-            return Response(status_code=200)   
 
         # ── Skip docs/health paths ───────────────────────────────
         path = request.url.path
@@ -159,7 +156,7 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
             # ── Add Security Headers ──────────────────────────────
             response.headers["X-TEE-Threat-Score"] = str(threat_score)
             response.headers["X-TEE-Threat-Type"] = threat_type
-            response.headers["X-TEE-Proof"] = threat_result["proof"][:64]
+            response.headers["X-TEE-Proof"] = threat_result["proof"]
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["X-Frame-Options"] = "DENY"
             response.headers["X-TEE-Version"] = "1.0.0"
@@ -168,11 +165,7 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
             return response
 
         except Exception as e:
-            import traceback
-        
             logger.error(f"TEE Gateway error: {e}")
-            traceback.print_exc()
-        
             # On error: allow request through (fail-open for availability)
             response = await call_next(request)
             response.headers["X-TEE-Status"] = "error"
