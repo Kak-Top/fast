@@ -15,11 +15,7 @@ class Settings(BaseSettings):
     CKKS_SCALE: int = 2**40
     
     # Performance
-    CACHE_TTL_SECONDS: int = 300  # 5 min (TurboQuant encoded-vitals cache)
-    AI_CONCURRENCY_LIMIT: int = 3  # Max parallel AI/CKKS computations
-    RISK_CACHE_TTL_SECONDS: int = 5  # In-memory risk result cache (seconds)
-    TICK_INTERVAL: int = 15  # Simulator vitals generation interval (seconds)
-    PATIENT_POLL_INTERVAL: int = 60  # Patient discovery polling interval (seconds)
+    CACHE_TTL_SECONDS: int = 300  # 5 min
     
     # Kafka
     KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_SERVERS", "localhost:9092")
