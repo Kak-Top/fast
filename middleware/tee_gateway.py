@@ -56,6 +56,9 @@ class TEEGatewayMiddleware(BaseHTTPMiddleware):
         
         if not TEE_ENABLED:
             return await call_next(request)
+         # ── Allow CORS preflight requests ────────────────────────
+        if request.method == "OPTIONS":
+            return Response(status_code=200)   
 
         # ── Skip docs/health paths ───────────────────────────────
         path = request.url.path
