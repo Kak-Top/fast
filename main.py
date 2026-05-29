@@ -112,10 +112,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-
+app.add_middleware(TEEGatewayMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://app.capstone.dpdns.org",
+        "https://capstone.dpdns.org",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,7 +138,7 @@ app.include_router(realtime_router)
 app.include_router(tee_router)
 
 # ── TEE Middleware (must be LAST add_middleware call) ─
-app.add_middleware(TEEGatewayMiddleware)
+
 
 
 @app.get("/", tags=["Root"])
