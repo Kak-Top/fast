@@ -29,7 +29,6 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from routers.realtime_router import _kafka_inference_listener
 from patient_state_machine import PatientSimulator, PatientState
 from kafka_config import get_kafka_config, is_cloud_kafka
-from config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,17 +42,18 @@ API_USERNAME = os.getenv("API_USERNAME", "admin")
 API_PASSWORD = os.getenv("API_PASSWORD", "admin123")
 VITALS_TOPIC = "vitals.raw"
 LABS_TOPIC = "labs.results"
-
-# Pull intervals from config (single source of truth); env var overrides still work
-TICK_INTERVAL = int(os.getenv("TICK_INTERVAL", str(settings.TICK_INTERVAL)))
-PATIENT_POLL_INTERVAL = int(os.getenv("PATIENT_POLL_INTERVAL", str(settings.PATIENT_POLL_INTERVAL)))
+TICK_INTERVAL = int(os.getenv("TICK_INTERVAL", "10"))
+PATIENT_POLL_INTERVAL = int(os.getenv("PATIENT_POLL_INTERVAL", "30"))
 
 # ─── Self base URL — always resolved at call time, never at import time ───────
 def _get_self_base() -> str:
+    # SELF_BASE env var takes priority (set this in Render to http://127.0.0.1:10000)
+    # Falls back to PORT env var, then hardcoded 10000 (Render always uses 10000)
     explicit = os.getenv("SELF_BASE")
     if explicit:
         return explicit
     port = os.getenv("PORT", "10000")
+    # Guard against Render passing the literal string "${PORT}" before substitution
     if not port.isdigit():
         port = "10000"
     return f"http://127.0.0.1:{port}"
@@ -96,7 +96,6 @@ async def _fetch_patients(client: httpx.AsyncClient) -> list:
     resp = await client.get(
         f"{base}/icu/patients",
         headers={"Authorization": f"Bearer {token}"},
-        timeout=10,
     )
     resp.raise_for_status()
     return resp.json().get("patients", [])
@@ -174,7 +173,7 @@ async def _single_patient_sim_loop(patient_id: str):
             log.info("[Simulator] Stopped loop for %s", patient_id)
             break
         except Exception as e:
-            log.error("[Simulator] Error in sim loop for %s: %s", patient_id, e)
+            log.error("Error posting labs for %s: %s", patient_id, e)
 
         await asyncio.sleep(TICK_INTERVAL)
 
@@ -238,20 +237,14 @@ async def _patient_discovery_loop():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Vitals Consumer — uses batch risk endpoint
+# Vitals Consumer
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _vitals_consumer_loop():
-    """
-    Consumes vitals.raw, POSTs to /icu/vitals, gets AI risk via batch endpoint,
-    publishes to inference.output.
-    """
+    """Consumes vitals.raw, POSTs to /icu/vitals, gets AI risk, publishes to inference.output."""
     kafka_cfg = get_kafka_config()
     await asyncio.sleep(5)
     log.info("[VitalsConsumer] Starting...")
-
-    # Accumulate patient IDs seen in one flush window before batching risk call
-    _pending_risk: Dict[str, dict] = {}  # {patient_id: {vitals, api_response, simulator_state}}
 
     while True:
         consumer = None
@@ -279,9 +272,10 @@ async def _vitals_consumer_loop():
                     simulator_state = data.get("state", "unknown")
                     base = _get_self_base()
 
-                    # ── Step 1: POST vitals ────────────────────────────────────
                     try:
                         token = await _get_token(client)
+
+                        # 1. POST vitals
                         resp = await client.post(
                             f"{base}/icu/vitals/{patient_id}",
                             json=vitals,
@@ -295,87 +289,35 @@ async def _vitals_consumer_loop():
                         log.info("✓ %s vitals ingested | critical=%s | flags=%d",
                                  patient_id, is_critical, len(flags))
 
-                        # Queue patient for batch risk calculation
-                        _pending_risk[patient_id] = {
-                            "vitals": vitals,
-                            "api_response": api_response,
-                            "simulator_state": simulator_state,
-                        }
-
-                    except httpx.TimeoutException:
-                        log.warning("[VitalsConsumer] Vitals POST timed out for %s — skipping", patient_id)
-                        continue
-                    except httpx.HTTPStatusError as e:
-                        log.error("[VitalsConsumer] API error for %s: %s %s",
-                                  patient_id, e.response.status_code, e.response.text[:200])
-                        continue
-                    except Exception as e:
-                        log.error("[VitalsConsumer] Unexpected error ingesting vitals for %s: %s", patient_id, e)
-                        continue
-
-                    # ── Step 2: Batch risk for all pending patients ────────────
-                    # Drain all currently buffered patient IDs in one HTTP call.
-                    if not _pending_risk:
-                        continue
-
-                    pending_ids = list(_pending_risk.keys())
-                    batch_risks: Dict[str, dict] = {}
-
-                    try:
-                        token = await _get_token(client)
-                        resp2 = await client.post(
-                            f"{base}/icu/ai/risk/batch",
-                            json={"patient_ids": pending_ids},
+                        # 2. Get AI risk
+                        resp2 = await client.get(
+                            f"{base}/icu/ai/risk/{patient_id}",
                             headers={"Authorization": f"Bearer {token}"},
-                            timeout=15,
+                            timeout=10,
                         )
                         resp2.raise_for_status()
-                        batch_result = resp2.json()
-                        batch_risks = batch_result.get("results", {})
-                        cached = batch_result.get("cached_count", 0)
-                        log.info("[VitalsConsumer] Batch risk: %d patients | %d cached",
-                                 len(pending_ids), cached)
+                        risk = resp2.json()
 
-                    except httpx.TimeoutException:
-                        log.warning("[VitalsConsumer] Batch risk timed out — skipping risk for %s",
-                                    pending_ids)
-                        _pending_risk.clear()
-                        continue
-                    except httpx.HTTPStatusError as e:
-                        log.error("[VitalsConsumer] Batch risk API error: %s %s",
-                                  e.response.status_code, e.response.text[:200])
-                        _pending_risk.clear()
-                        continue
-                    except Exception as e:
-                        log.error("[VitalsConsumer] Batch risk unexpected error: %s", e)
-                        _pending_risk.clear()
-                        continue
-
-                    # ── Step 3: Publish each result to inference.output ────────
-                    for pid, pending in _pending_risk.items():
-                        risk = batch_risks.get(pid, {})
-                        if "error" in risk:
-                            log.warning("[VitalsConsumer] Risk error for %s: %s", pid, risk["error"])
-                            continue
-
+                        # 3. Publish to inference.output
                         output = {
-                            "patient_id": pid,
-                            "vitals": pending["vitals"],
-                            "vitals_response": pending["api_response"],
+                            "patient_id": patient_id,
+                            "vitals": vitals,
+                            "vitals_response": api_response,
                             "risk": risk,
-                            "simulator_state": pending["simulator_state"],
+                            "simulator_state": simulator_state,
                             "timestamp": time.time(),
                         }
-                        try:
-                            await producer.send_and_wait(
-                                "inference.output",
-                                key=pid.encode(),
-                                value=json.dumps(output).encode(),
-                            )
-                        except Exception as e:
-                            log.error("[VitalsConsumer] Failed to publish inference output for %s: %s", pid, e)
+                        await producer.send_and_wait(
+                            "inference.output",
+                            key=patient_id.encode(),
+                            value=json.dumps(output).encode(),
+                        )
 
-                    _pending_risk.clear()
+                    except httpx.HTTPStatusError as e:
+                        log.error("API error for %s: %s %s",
+                                  patient_id, e.response.status_code, e.response.text[:200])
+                    except Exception as e:
+                        log.error("Error processing vitals for %s: %s", patient_id, e)
 
         except asyncio.CancelledError:
             log.info("[VitalsConsumer] Shutting down")
@@ -440,14 +382,12 @@ async def _labs_consumer_loop():
                             labs["wbc"], labs["lactate"],
                             len(result.get("abnormal_flags", [])),
                         )
-                    except httpx.TimeoutException:
-                        log.warning("[LabsConsumer] Labs POST timed out for %s — skipping", patient_id)
                     except httpx.HTTPStatusError as e:
-                        log.error("[LabsConsumer] Labs API error for %s: %s — %s",
-                                  patient_id, e.response.status_code, e.response.text[:300])
+                        log.error("Labs API error for %s: %s — %s",
+                            patient_id, e.response.status_code, e.response.text[:300])
                     except Exception as e:
-                        log.error("[LabsConsumer] Error posting labs for %s: %s — type=%s",
-                                  patient_id, e, type(e).__name__, exc_info=True)
+                         log.error("Error posting labs for %s: %s — type=%s",
+                            patient_id, e, type(e).__name__, exc_info=True)
 
         except asyncio.CancelledError:
             log.info("[LabsConsumer] Shutting down")
@@ -464,7 +404,7 @@ async def _labs_consumer_loop():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WebSocket Broadcaster
+# Public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _inference_ws_broadcaster():
@@ -498,36 +438,25 @@ async def _inference_ws_broadcaster():
                     "patient_id": patient_id,
                     "riskPercentage": ra.get("overall_score", 0),
                     "label": ra.get("category", "LOW RISK"),
-                    "mort_7d": ra.get("mort_7d"),
-                    "mort_30d": ra.get("mort_30d"),
-                    "sofa_score": ra.get("sofa_score"),
-                    "factors": risk_obj.get("contributing_factors", []),
+                    "mort_7d": risk_obj.get("mort_7d"),        # NEW field
+                    "mort_30d": risk_obj.get("mort_30d"),      # NEW field
+                    "sofa_score": risk_obj.get("sofa_score"),  # NEW field
+                    "factors": data.get("contributing_factors", []),
                     "vitals": data.get("vitals", {}),
                     "simulator_state": data.get("simulator_state", "stable"),
                     "timestamp": data.get("timestamp"),
                 }
-                try:
-                    await manager.broadcast(patient_id, payload)
-                except Exception as e:
-                    log.error("[WSBroadcaster] Broadcast error for %s: %s", patient_id, e)
+                await manager.broadcast(patient_id, payload)
 
         except asyncio.CancelledError:
-            log.info("[WSBroadcaster] Shutting down")
             break
         except Exception as e:
             log.error("[WSBroadcaster] %s — retrying in 5s", e)
             await asyncio.sleep(5)
         finally:
             if consumer:
-                try:
-                    await consumer.stop()
-                except Exception:
-                    pass
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Public API
-# ═══════════════════════════════════════════════════════════════════════════════
+                try: await consumer.stop()
+                except: pass
 
 async def start_pipeline():
     log.info("═" * 50)
@@ -542,7 +471,9 @@ async def start_pipeline():
     _tasks.append(asyncio.create_task(_patient_discovery_loop()))
     _tasks.append(asyncio.create_task(_vitals_consumer_loop()))
     _tasks.append(asyncio.create_task(_labs_consumer_loop()))
-    _tasks.append(asyncio.create_task(_inference_ws_broadcaster()))
+
+    # ← ADD THIS — WebSocket broadcaster, started after a delay so Kafka is ready
+    
     _tasks.append(asyncio.create_task(_kafka_inference_listener()))
 
 
