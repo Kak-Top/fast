@@ -1,0 +1,68 @@
+{
+  "model_type": "Gradient Boosting Classifier",
+  "accuracy": 0.8524464831804281,
+  "f1_score": 0.419469510527755,
+  "auc_roc": 0.8662975709306613,
+  "cv_accuracy": 0.9353409302537304,
+  "cv_f1_score": 0.27304695536358337,
+  "cv_auc_roc": 0.860374985675367,
+  "feature_importance": {
+    "Feature": {
+      "7": "SpO2",
+      "5": "RespRate",
+      "6": "Temp",
+      "1": "HR",
+      "11": "Lactate",
+      "9": "Creatinine",
+      "4": "MAP",
+      "3": "DiasBP",
+      "10": "WBC",
+      "8": "Glucose"
+    },
+    "Importance": {
+      "7": 0.32778513948136945,
+      "5": 0.1583717375141865,
+      "6": 0.13300693971080715,
+      "1": 0.1099628748639755,
+      "11": 0.07899687561338656,
+      "9": 0.05218828729978754,
+      "4": 0.04748048626731557,
+      "3": 0.03219804013407665,
+      "10": 0.028067417491339314,
+      "8": 0.012437800397240219
+    }
+  },
+  "n_estimators": 100,
+  "max_depth": 3,
+  "learning_rate": 0.05,
+  "subsample": 0.8,
+  "max_features": "sqrt",
+  "training_samples": 57548,
+  "test_samples": 14388,
+  "features": [
+    "Age",
+    "HR",
+    "SysBP",
+    "DiasBP",
+    "MAP",
+    "RespRate",
+    "Temp",
+    "SpO2",
+    "Glucose",
+    "Creatinine",
+    "WBC",
+    "Lactate"
+  ],
+  "class_balancing": "Sample weights (auto-calculated)",
+  "feature_engineering": "Multi-dataset combination (5 datasets)",
+  "data_source": "Combined: PhysioNet2019 (40336 samples), PhysioNet2025 (3600 samples), ICU_Monitoring (15000 samples), Synthetic_ICU (12000 samples), ICU_Risk_Score (1000 samples)",
+  "datasets_used": [
+    "PhysioNet2019 (40336 samples)",
+    "PhysioNet2025 (3600 samples)",
+    "ICU_Monitoring (15000 samples)",
+    "Synthetic_ICU (12000 samples)",
+    "ICU_Risk_Score (1000 samples)"
+  ],
+  "optimal_threshold": 0.6959865449238963,
+  "threshold_optimization": "Precision-Recall Curve for F1-score"
+}
