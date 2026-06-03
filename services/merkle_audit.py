@@ -96,6 +96,12 @@ class MerkleTree:
         self._leaves.append(leaf)
         self._log_entries.append(entry)
 
+        # ── FIX: Limit tree size to prevent CPU starvation ──
+        MAX_LEAVES = 200
+        if len(self._leaves) > MAX_LEAVES:
+            self._leaves = self._leaves[-MAX_LEAVES:]
+            self._log_entries = self._log_entries[-MAX_LEAVES:]
+
         # Rebuild tree
         self._root = self._build_tree(self._leaves)
 
